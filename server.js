@@ -1,112 +1,129 @@
-const http = require('http');
-const WebSocket = require('ws');
+const WebSocket = require("ws");
 
 const PORT = process.env.PORT || 3000;
+const wss = new WebSocket.Server({ port: PORT });
 
 const FIELD_WIDTH = 1000;
 const FIELD_HEIGHT = 600;
-const GOAL_WIDTH = 100;
-const GOAL_HEIGHT = 150;
+const PLAYER_SIZE = 40;
+const BALL_SIZE = 30;
+
 const MATCH_DURATION_MS = 5 * 60 * 1000; // 5 dakika
 
-const server = http.createServer();
-const wss = new WebSocket.Server({ server });
-
-let rooms = {};
-
-function createRoom(roomId) {
-  rooms[roomId] = {
-    players: new Map(),
-    ball: { x: FIELD_WIDTH / 2 - 15, y: FIELD_HEIGHT / 2 - 15, vx: 0, vy: 0 },
-    score: { left: 0, right: 0 },
-    startTime: Date.now(),
-    ended: false,
-  };
-  rooms[roomId].roomId = roomId;
+class Player {
+  constructor(nickname, ws) {
+    this.nickname = nickname;
+    this.ws = ws;
+    this.x = 100;
+    this.y = 100;
+    this.room = null;
+  }
 }
 
-function broadcast(roomId, message) {
-  if (!rooms[roomId]) return;
-  rooms[roomId].players.forEach(({ ws }) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(message));
+class Room {
+  constructor(id) {
+    this.id = id;
+    this.players = new Map();
+    this.ball = { x: 485, y: 285, vx: 0, vy: 0 };
+    this.score = { left: 0, right: 0 };
+    this.matchEndTime = Date.now() + MATCH_DURATION_MS;
+  }
+
+  broadcast(data) {
+    const msg = JSON.stringify(data);
+    for (const player of this.players.values()) {
+      if (player.ws.readyState === WebSocket.OPEN) {
+        player.ws.send(msg);
+      }
     }
-  });
-}
-
-function resetBall(room) {
-  room.ball.x = FIELD_WIDTH / 2 - 15;
-  room.ball.y = FIELD_HEIGHT / 2 - 15;
-  room.ball.vx = 0;
-  room.ball.vy = 0;
-}
-
-function updateBall(room) {
-  if (room.ended) return;
-
-  let ball = room.ball;
-  ball.x += ball.vx;
-  ball.y += ball.vy;
-
-  // Sınırlar ve kaleler
-  if (ball.y <= 0) {
-    ball.y = 0;
-    ball.vy = -ball.vy * 0.7;
-  }
-  if (ball.y + 30 >= FIELD_HEIGHT) {
-    ball.y = FIELD_HEIGHT - 30;
-    ball.vy = -ball.vy * 0.7;
   }
 
-  // Sol kale ve gol kontrolü
-  if (ball.x <= 0) {
-    if (ball.y + 30 > (FIELD_HEIGHT / 2 - GOAL_HEIGHT / 2) && ball.y < (FIELD_HEIGHT / 2 + GOAL_HEIGHT / 2)) {
-      room.score.right++;
-      resetBall(room);
-      broadcast(room.roomId, { type: "score", score: room.score });
-      broadcast(room.roomId, { type: "goal", side: "right" });
+  update() {
+    // Topu hareket ettir
+    this.ball.x += this.ball.vx;
+    this.ball.y += this.ball.vy;
+
+    // Top sınırlar
+    if (this.ball.x < 0) {
+      // Gol solda
+      this.score.right++;
+      this.resetBall();
+      this.broadcast({ type: "score", score: this.score });
+      return;
+    }
+    if (this.ball.x > FIELD_WIDTH - BALL_SIZE) {
+      // Gol sağda
+      this.score.left++;
+      this.resetBall();
+      this.broadcast({ type: "score", score: this.score });
+      return;
+    }
+    if (this.ball.y < 0) {
+      this.ball.y = 0;
+      this.ball.vy *= -1;
+    }
+    if (this.ball.y > FIELD_HEIGHT - BALL_SIZE) {
+      this.ball.y = FIELD_HEIGHT - BALL_SIZE;
+      this.ball.vy *= -1;
+    }
+
+    // Oyunculara çarpma
+    for (const player of this.players.values()) {
+      if (this.checkCollision(player, this.ball)) {
+        // Topa vur
+        this.ball.vx = (this.ball.x - player.x) * 0.3;
+        this.ball.vy = (this.ball.y - player.y) * 0.3;
+      }
+    }
+
+    // Top hızını yavaşlat
+    this.ball.vx *= 0.95;
+    this.ball.vy *= 0.95;
+
+    // Maç bitiş kontrolü
+    if (Date.now() >= this.matchEndTime) {
+      this.broadcast({ type: "matchEnd", score: this.score });
+      this.players.clear(); // Odayı temizle
+      clearInterval(this.interval);
     } else {
-      ball.x = 0;
-      ball.vx = -ball.vx * 0.7;
+      // Güncelleme bilgisini yolla
+      this.broadcast({
+        type: "update",
+        players: Array.from(this.players.values()).map(p => ({
+          nickname: p.nickname,
+          x: p.x,
+          y: p.y
+        })),
+        ball: { x: this.ball.x, y: this.ball.y },
+        score: this.score
+      });
     }
   }
 
-  // Sağ kale ve gol kontrolü
-  if (ball.x + 30 >= FIELD_WIDTH) {
-    if (ball.y + 30 > (FIELD_HEIGHT / 2 - GOAL_HEIGHT / 2) && ball.y < (FIELD_HEIGHT / 2 + GOAL_HEIGHT / 2)) {
-      room.score.left++;
-      resetBall(room);
-      broadcast(room.roomId, { type: "score", score: room.score });
-      broadcast(room.roomId, { type: "goal", side: "left" });
-    } else {
-      ball.x = FIELD_WIDTH - 30;
-      ball.vx = -ball.vx * 0.7;
-    }
+  resetBall() {
+    this.ball.x = (FIELD_WIDTH - BALL_SIZE) / 2;
+    this.ball.y = (FIELD_HEIGHT - BALL_SIZE) / 2;
+    this.ball.vx = 0;
+    this.ball.vy = 0;
   }
 
-  // Hareket sürtünmesi
-  ball.vx *= 0.95;
-  ball.vy *= 0.95;
-
-  broadcast(room.roomId, { type: "ball", x: ball.x, y: ball.y });
-}
-
-function checkMatchEnd(room) {
-  if (room.ended) return;
-
-  if (Date.now() - room.startTime >= MATCH_DURATION_MS) {
-    room.ended = true;
-    broadcast(room.roomId, { type: "matchEnd", score: room.score });
+  checkCollision(player, ball) {
+    const px = player.x + PLAYER_SIZE / 2;
+    const py = player.y + PLAYER_SIZE / 2;
+    const bx = ball.x + BALL_SIZE / 2;
+    const by = ball.y + BALL_SIZE / 2;
+    const distSq = (px - bx) ** 2 + (py - by) ** 2;
+    const radiusSum = PLAYER_SIZE / 2 + BALL_SIZE / 2;
+    return distSq < radiusSum * radiusSum;
   }
 }
 
-wss.on('connection', (ws) => {
-  ws.isAlive = true;
-  ws.on('pong', () => {
-    ws.isAlive = true;
-  });
+const rooms = new Map();
 
-  ws.on('message', (message) => {
+wss.on("connection", (ws) => {
+  let currentPlayer = null;
+
+  ws.on("message", (message) => {
     let data;
     try {
       data = JSON.parse(message);
@@ -115,80 +132,77 @@ wss.on('connection', (ws) => {
     }
 
     if (data.type === "join") {
-      const { roomId, nickname } = data;
-      if (!rooms[roomId]) createRoom(roomId);
-
-      if (rooms[roomId].ended) {
-        ws.send(JSON.stringify({ type: "matchEnded", message: "Maç sona erdi!" }));
+      const { nickname, roomId } = data;
+      if (!nickname || !roomId) {
+        ws.send(JSON.stringify({ type: "error", message: "Nickname ve oda ID gerekli" }));
         return;
       }
 
-      rooms[roomId].players.set(nickname, { x: 100, y: 100, ws });
-      ws.nickname = nickname;
-      ws.roomId = roomId;
+      let room = rooms.get(roomId);
+      if (!room) {
+        room = new Room(roomId);
+        rooms.set(roomId, room);
+        // Maç güncellemeleri için interval başlat
+        room.interval = setInterval(() => room.update(), 100);
+      }
 
-      // Oyuncu listesi gönder
-      broadcast(roomId, { type: "players", players: Array.from(rooms[roomId].players.keys()) });
-      // Skor ve top gönder
-      broadcast(roomId, { type: "score", score: rooms[roomId].score });
-      broadcast(roomId, { type: "ball", x: rooms[roomId].ball.x, y: rooms[roomId].ball.y });
-    } 
-    else if (data.type === "move") {
-      const room = rooms[ws.roomId];
-      if (!room || room.ended) return;
-
-      const player = room.players.get(ws.nickname);
-      if (!player) return;
-
-      // Oyuncu pozisyonunu güncelle
-      player.x = Math.min(Math.max(0, data.x), FIELD_WIDTH - 40);
-      player.y = Math.min(Math.max(0, data.y), FIELD_HEIGHT - 40);
-
-      // Eğer şut varsa topa vur
-      if (data.action === "kick") {
-        const dx = room.ball.x + 15 - (player.x + 20);
-        const dy = room.ball.y + 15 - (player.y + 20);
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < 60) { // yakınsa topa vur
-          const power = 10;
-          room.ball.vx = (dx / dist) * power;
-          room.ball.vy = (dy / dist) * power;
+      // Aynı oda, aynı nick kontrolü
+      for (const p of room.players.values()) {
+        if (p.nickname === nickname) {
+          ws.send(JSON.stringify({ type: "error", message: "Bu nick zaten kullanılıyor!" }));
+          return;
         }
       }
 
-      // Güncellemeleri tüm oyunculara yolla
-      broadcast(room.roomId, { type: "move", nickname: ws.nickname, x: player.x, y: player.y });
+      const player = new Player(nickname, ws);
+      player.room = room;
+      room.players.set(ws, player);
+      currentPlayer = player;
+
+      // Başlangıç pozisyonu dağıt (sağ-sol takımı için basit ayırma)
+      if (room.players.size % 2 === 0) {
+        player.x = 100;
+        player.y = 100 + Math.random() * (FIELD_HEIGHT - PLAYER_SIZE);
+      } else {
+        player.x = FIELD_WIDTH - 140;
+        player.y = 100 + Math.random() * (FIELD_HEIGHT - PLAYER_SIZE);
+      }
+
+      // Oyuncuları gönder
+      room.broadcast({
+        type: "players",
+        players: Array.from(room.players.values()).map(p => ({
+          nickname: p.nickname,
+          x: p.x,
+          y: p.y
+        }))
+      });
+    }
+
+    if (data.type === "move" && currentPlayer && currentPlayer.room) {
+      const room = currentPlayer.room;
+      currentPlayer.x = Math.min(Math.max(0, data.x), FIELD_WIDTH - PLAYER_SIZE);
+      currentPlayer.y = Math.min(Math.max(0, data.y), FIELD_HEIGHT - PLAYER_SIZE);
+
+      if (data.action === "kick") {
+        // Eğer topa yakınsa, topa vur
+        const distX = currentPlayer.x + PLAYER_SIZE / 2 - (room.ball.x + BALL_SIZE / 2);
+        const distY = currentPlayer.y + PLAYER_SIZE / 2 - (room.ball.y + BALL_SIZE / 2);
+        const dist = Math.sqrt(distX * distX + distY * distY);
+        if (dist < 80) {
+          // Topa kuvvet uygula
+          room.ball.vx = distX * 0.7;
+          room.ball.vy = distY * 0.7;
+        }
+      }
     }
   });
 
-  ws.on('close', () => {
-    const room = rooms[ws.roomId];
-    if (!room) return;
-
-    room.players.delete(ws.nickname);
-    broadcast(ws.roomId, { type: "players", players: Array.from(room.players.keys()) });
-  });
-});
-
-// Topu ve maç bitişini düzenli kontrol et
-setInterval(() => {
-  Object.values(rooms).forEach(room => {
-    if (!room.ended) {
-      updateBall(room);
-      checkMatchEnd(room);
+  ws.on("close", () => {
+    if (currentPlayer && currentPlayer.room) {
+      currentPlayer.room.players.delete(ws);
     }
   });
-}, 40); // 25 FPS
-
-// WebSocket ping/pong bağlantı kontrolü
-setInterval(() => {
-  wss.clients.forEach(ws => {
-    if (!ws.isAlive) return ws.terminate();
-    ws.isAlive = false;
-    ws.ping();
-  });
-}, 30000);
-
-server.listen(PORT, () => {
-  console.log(`✅ HackBall WebSocket server ${PORT} portunda çalışıyor`);
 });
+
+console.log(`✅ HackBall WebSocket server ${PORT} portunda çalışıyor`);
