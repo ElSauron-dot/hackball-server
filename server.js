@@ -1,133 +1,127 @@
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const { v4: uuidv4 } = require('uuid');
+const WebSocket = require("ws");
+const http = require("http");
+const { v4: uuid } = require("uuid");
 
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server);
+const server = http.createServer();
+const wss = new WebSocket.Server({ server });
 
-app.use(express.static(__dirname));
+let parties = {};
 
-const PORT = process.env.PORT || 3000;
+function createBall() {
+  return { x: 400, y: 250, vx: 0, vy: 0 };
+}
 
-let games = {}; // partyId -> game data
+function broadcast(partyId, data) {
+  const msg = JSON.stringify(data);
+  Object.values(parties[partyId].players).forEach(p => p.ws.send(msg));
+}
 
-io.on('connection', (socket) => {
-  let player = null;
-  let partyId = null;
+function updateGame(party) {
+  const ball = party.ball;
 
-  socket.on('join', ({ nickname, team }) => {
-    partyId = Object.keys(games).find(id => games[id].players.length < 6) || uuidv4();
+  // Topu hareket ettir
+  ball.x += ball.vx;
+  ball.y += ball.vy;
 
-    if (!games[partyId]) {
-      games[partyId] = {
-        players: [],
-        ball: { x: 500, y: 300, vx: 0, vy: 0 },
-        host: socket.id,
+  // Saha sınırları
+  if (ball.x < 12 || ball.x > 788) ball.vx *= -1;
+  if (ball.y < 12 || ball.y > 488) ball.vy *= -1;
+
+  // Oyuncularla çarpışma
+  for (const player of Object.values(party.players)) {
+    const dx = ball.x - player.x;
+    const dy = ball.y - player.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 27) {
+      const angle = Math.atan2(dy, dx);
+      ball.vx = Math.cos(angle) * 5;
+      ball.vy = Math.sin(angle) * 5;
+    }
+  }
+}
+
+wss.on("connection", ws => {
+  let playerId, partyId;
+
+  ws.on("message", message => {
+    const data = JSON.parse(message);
+
+    if (data.type === "join") {
+      playerId = uuid();
+      partyId = uuid().slice(0, 5);
+
+      parties[partyId] = parties[partyId] || {
+        players: {},
+        ball: createBall(),
+        creator: playerId,
         startTime: Date.now()
       };
+
+      parties[partyId].players[playerId] = {
+        id: playerId,
+        nickname: data.nickname,
+        x: data.team === "red" ? 100 : 700,
+        y: 250,
+        team: data.team,
+        keys: {},
+        ws
+      };
+
+      ws.send(JSON.stringify({ type: "state", id: playerId }));
     }
 
-    player = {
-      id: socket.id,
-      nickname,
-      x: Math.random() * 900 + 50,
-      y: Math.random() * 500 + 50,
-      team,
-      keys: {},
-      isHost: socket.id === games[partyId].host
-    };
-
-    games[partyId].players.push(player);
-
-    socket.join(partyId);
-
-    socket.emit('teamSelect');
-  });
-
-  socket.on('key', ({ key, state }) => {
-    if (player) {
-      player.keys[key] = state;
+    if (data.type === "keydown" || data.type === "keyup") {
+      if (!parties[partyId] || !parties[partyId].players[playerId]) return;
+      parties[partyId].players[playerId].keys[data.key] = data.type === "keydown";
     }
-  });
 
-  socket.on('setTeam', ({ id, team }) => {
-    const game = games[partyId];
-    if (game && game.host === socket.id) {
-      const p = game.players.find(p => p.id === id);
-      if (p) p.team = team;
+    if (data.type === "changeTeam") {
+      if (parties[partyId]?.creator === playerId && parties[partyId].players[data.id]) {
+        parties[partyId].players[data.id].team = data.team;
+      }
     }
-  });
 
-  socket.on('kick', (id) => {
-    const game = games[partyId];
-    if (game && game.host === socket.id) {
-      const index = game.players.findIndex(p => p.id === id);
-      if (index !== -1) {
-        const target = game.players.splice(index, 1)[0];
-        io.to(target.id).disconnectSockets(true);
+    if (data.type === "kick") {
+      if (parties[partyId]?.creator === playerId) {
+        parties[partyId].players[data.id]?.ws.close();
+        delete parties[partyId].players[data.id];
       }
     }
   });
 
-  socket.on('disconnect', () => {
-    const game = games[partyId];
-    if (game) {
-      game.players = game.players.filter(p => p.id !== socket.id);
-      if (game.players.length === 0) {
-        delete games[partyId];
+  ws.on("close", () => {
+    if (parties[partyId]) {
+      delete parties[partyId].players[playerId];
+      if (Object.keys(parties[partyId].players).length === 0) {
+        delete parties[partyId];
       }
     }
   });
 });
 
 setInterval(() => {
-  for (const [id, game] of Object.entries(games)) {
-    for (const p of game.players) {
-      const speed = 5;
-      if (p.keys['ArrowUp']) p.y -= speed;
-      if (p.keys['ArrowDown']) p.y += speed;
-      if (p.keys['ArrowLeft']) p.x -= speed;
-      if (p.keys['ArrowRight']) p.x += speed;
-
-      // Top ile çarpışma ve sürükleme
-      const dx = game.ball.x - p.x;
-      const dy = game.ball.y - p.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < 25) {
-        const force = 0.5;
-        game.ball.vx += -dx * force / 25;
-        game.ball.vy += -dy * force / 25;
-      }
+  for (const [id, party] of Object.entries(parties)) {
+    for (const p of Object.values(party.players)) {
+      const speed = 4;
+      if (p.keys["ArrowUp"]) p.y -= speed;
+      if (p.keys["ArrowDown"]) p.y += speed;
+      if (p.keys["ArrowLeft"]) p.x -= speed;
+      if (p.keys["ArrowRight"]) p.x += speed;
     }
 
-    // Top fiziği
-    game.ball.x += game.ball.vx;
-    game.ball.y += game.ball.vy;
-    game.ball.vx *= 0.98;
-    game.ball.vy *= 0.98;
+    updateGame(party);
 
-    // Saha sınırları
-    if (game.ball.x < 0 || game.ball.x > 1000) game.ball.vx *= -1;
-    if (game.ball.y < 0 || game.ball.y > 600) game.ball.vy *= -1;
-
-    // Maç süresi (5 dk)
-    if (Date.now() - game.startTime > 5 * 60 * 1000) {
-      io.to(id).emit('matchEnd');
-      delete games[id];
-      continue;
-    }
-
-    io.to(id).emit('state', {
-      players: Object.fromEntries(game.players.map(p => [p.id, p])),
-      ball: game.ball,
-      isHost: game.host === game.players.find(p => p.id === p.id)?.id,
-      partyId: id
+    broadcast(id, {
+      type: "state",
+      players: Object.fromEntries(Object.entries(party.players).map(([id, p]) => [id, {
+        x: p.x, y: p.y, nickname: p.nickname, team: p.team
+      }])),
+      ball: party.ball,
+      id: party.creator,
+      partyId: id,
+      creator: party.creator
     });
   }
 }, 1000 / 60);
 
-server.listen(PORT, () => {
-  console.log(`✅ HackBall sunucusu ${PORT} portunda çalışıyor`);
-});
+server.listen(3000, () => console.log("✅ HackBall WebSocket server 3000 portunda çalışıyor"));
