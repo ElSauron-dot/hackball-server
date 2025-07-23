@@ -184,4 +184,40 @@ wss.on("connection", (ws) => {
           y: p.y,
           team: p.team
         }))
-     
+      });
+    }
+
+    if (data.type === "move" && currentPlayer) {
+      if (typeof data.x === "number" && typeof data.y === "number") {
+        // Sahanın dışına çıkmayı engelle
+        currentPlayer.x = Math.min(Math.max(0, data.x), FIELD_WIDTH - PLAYER_SIZE);
+        currentPlayer.y = Math.min(Math.max(0, data.y), FIELD_HEIGHT - PLAYER_SIZE);
+
+        // Şut varsa topa ekstra hız ver
+        if (data.action === "kick") {
+          const dx = currentPlayer.x + PLAYER_SIZE/2 - (currentPlayer.room.ball.x + BALL_SIZE/2);
+          const dy = currentPlayer.y + PLAYER_SIZE/2 - (currentPlayer.room.ball.y + BALL_SIZE/2);
+          currentPlayer.room.ball.vx -= dx * 0.5;
+          currentPlayer.room.ball.vy -= dy * 0.5;
+        }
+      }
+    }
+  });
+
+  ws.on("close", () => {
+    if (currentPlayer && currentPlayer.room) {
+      currentPlayer.room.players.delete(ws);
+      currentPlayer.room.broadcast({
+        type: "players",
+        players: Array.from(currentPlayer.room.players.values()).map(p => ({
+          nickname: p.nickname,
+          x: p.x,
+          y: p.y,
+          team: p.team
+        }))
+      });
+    }
+  });
+});
+
+console.log(`✅ HackBall WebSocket server ${PORT} portunda çalışıyor`);
