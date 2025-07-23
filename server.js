@@ -94,19 +94,20 @@ class Room {
       this.broadcast({ type: "matchEnd", score: this.score });
       this.players.clear();
       clearInterval(this.interval);
-    } else {
-      this.broadcast({
-        type: "update",
-        players: Array.from(this.players.values()).map(p => ({
-          nickname: p.nickname,
-          x: p.x,
-          y: p.y,
-          team: p.team
-        })),
-        ball: { x: this.ball.x, y: this.ball.y },
-        score: this.score
-      });
+      return;
     }
+
+    this.broadcast({
+      type: "update",
+      players: Array.from(this.players.values()).map(p => ({
+        nickname: p.nickname,
+        x: p.x,
+        y: p.y,
+        team: p.team
+      })),
+      ball: { x: this.ball.x, y: this.ball.y },
+      score: this.score
+    });
   }
 
   resetBall() {
@@ -151,7 +152,7 @@ wss.on("connection", (ws) => {
       if (!room) {
         room = new Room(roomId);
         rooms.set(roomId, room);
-        room.interval = setInterval(() => room.update(), 100);
+        room.interval = setInterval(() => room.update(), 33); // 30 FPS güncelleme
       }
 
       for (const p of room.players.values()) {
@@ -183,40 +184,4 @@ wss.on("connection", (ws) => {
           y: p.y,
           team: p.team
         }))
-      });
-    }
-
-    if (data.type === "move" && currentPlayer && currentPlayer.room) {
-      const room = currentPlayer.room;
-      currentPlayer.x = Math.min(Math.max(0, data.x), FIELD_WIDTH - PLAYER_SIZE);
-      currentPlayer.y = Math.min(Math.max(0, data.y), FIELD_HEIGHT - PLAYER_SIZE);
-
-      if (data.action === "kick") {
-        const distX = currentPlayer.x + PLAYER_SIZE / 2 - (room.ball.x + BALL_SIZE / 2);
-        const distY = currentPlayer.y + PLAYER_SIZE / 2 - (room.ball.y + BALL_SIZE / 2);
-        const dist = Math.sqrt(distX * distX + distY * distY);
-        if (dist < 80) {
-          room.ball.vx = distX * 0.7;
-          room.ball.vy = distY * 0.7;
-        }
-      }
-    }
-  });
-
-  ws.on("close", () => {
-    if (currentPlayer && currentPlayer.room) {
-      currentPlayer.room.players.delete(ws);
-      currentPlayer.room.broadcast({
-        type: "players",
-        players: Array.from(currentPlayer.room.players.values()).map(p => ({
-          nickname: p.nickname,
-          x: p.x,
-          y: p.y,
-          team: p.team
-        }))
-      });
-    }
-  });
-});
-
-console.log(`✅ HackBall WebSocket server ${PORT} portunda çalışıyor`);
+     
