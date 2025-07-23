@@ -11,12 +11,13 @@ const BALL_SIZE = 30;
 const MATCH_DURATION_MS = 5 * 60 * 1000; // 5 dakika
 
 class Player {
-  constructor(nickname, ws) {
+  constructor(nickname, ws, team) {
     this.nickname = nickname;
     this.ws = ws;
     this.x = 100;
     this.y = 100;
     this.room = null;
+    this.team = team;
   }
 }
 
@@ -39,25 +40,34 @@ class Room {
   }
 
   update() {
-    // Topu hareket ettir
     this.ball.x += this.ball.vx;
     this.ball.y += this.ball.vy;
 
-    // Top sınırlar
+    // Kaleye göre gol kontrolü
     if (this.ball.x < 0) {
-      // Gol solda
-      this.score.right++;
-      this.resetBall();
-      this.broadcast({ type: "score", score: this.score });
-      return;
+      if (this.ball.y + BALL_SIZE/2 > (FIELD_HEIGHT/2 - 75) && this.ball.y + BALL_SIZE/2 < (FIELD_HEIGHT/2 + 75)) {
+        this.score.right++;
+        this.resetBall();
+        this.broadcast({ type: "score", score: this.score });
+        return;
+      } else {
+        this.ball.x = 0;
+        this.ball.vx *= -1;
+      }
     }
+
     if (this.ball.x > FIELD_WIDTH - BALL_SIZE) {
-      // Gol sağda
-      this.score.left++;
-      this.resetBall();
-      this.broadcast({ type: "score", score: this.score });
-      return;
+      if (this.ball.y + BALL_SIZE/2 > (FIELD_HEIGHT/2 - 75) && this.ball.y + BALL_SIZE/2 < (FIELD_HEIGHT/2 + 75)) {
+        this.score.left++;
+        this.resetBall();
+        this.broadcast({ type: "score", score: this.score });
+        return;
+      } else {
+        this.ball.x = FIELD_WIDTH - BALL_SIZE;
+        this.ball.vx *= -1;
+      }
     }
+
     if (this.ball.y < 0) {
       this.ball.y = 0;
       this.ball.vy *= -1;
@@ -67,32 +77,31 @@ class Room {
       this.ball.vy *= -1;
     }
 
-    // Oyunculara çarpma
+    // Oyuncu-top çarpışması
     for (const player of this.players.values()) {
       if (this.checkCollision(player, this.ball)) {
-        // Topa vur
         this.ball.vx = (this.ball.x - player.x) * 0.3;
         this.ball.vy = (this.ball.y - player.y) * 0.3;
       }
     }
 
-    // Top hızını yavaşlat
+    // Topun yavaşlaması
     this.ball.vx *= 0.95;
     this.ball.vy *= 0.95;
 
-    // Maç bitiş kontrolü
+    // Maç bitti mi kontrol et
     if (Date.now() >= this.matchEndTime) {
       this.broadcast({ type: "matchEnd", score: this.score });
-      this.players.clear(); // Odayı temizle
+      this.players.clear();
       clearInterval(this.interval);
     } else {
-      // Güncelleme bilgisini yolla
       this.broadcast({
         type: "update",
         players: Array.from(this.players.values()).map(p => ({
           nickname: p.nickname,
           x: p.x,
-          y: p.y
+          y: p.y,
+          team: p.team
         })),
         ball: { x: this.ball.x, y: this.ball.y },
         score: this.score
@@ -132,9 +141,9 @@ wss.on("connection", (ws) => {
     }
 
     if (data.type === "join") {
-      const { nickname, roomId } = data;
-      if (!nickname || !roomId) {
-        ws.send(JSON.stringify({ type: "error", message: "Nickname ve oda ID gerekli" }));
+      const { nickname, roomId, team } = data;
+      if (!nickname || !roomId || !team) {
+        ws.send(JSON.stringify({ type: "error", message: "Nickname, oda ID ve takım gerekli" }));
         return;
       }
 
@@ -142,11 +151,9 @@ wss.on("connection", (ws) => {
       if (!room) {
         room = new Room(roomId);
         rooms.set(roomId, room);
-        // Maç güncellemeleri için interval başlat
         room.interval = setInterval(() => room.update(), 100);
       }
 
-      // Aynı oda, aynı nick kontrolü
       for (const p of room.players.values()) {
         if (p.nickname === nickname) {
           ws.send(JSON.stringify({ type: "error", message: "Bu nick zaten kullanılıyor!" }));
@@ -154,27 +161,27 @@ wss.on("connection", (ws) => {
         }
       }
 
-      const player = new Player(nickname, ws);
+      const player = new Player(nickname, ws, team);
       player.room = room;
       room.players.set(ws, player);
       currentPlayer = player;
 
-      // Başlangıç pozisyonu dağıt (sağ-sol takımı için basit ayırma)
-      if (room.players.size % 2 === 0) {
-        player.x = 100;
-        player.y = 100 + Math.random() * (FIELD_HEIGHT - PLAYER_SIZE);
+      // Takıma göre başlangıç pozisyonu
+      if (team === "red") {
+        player.x = 50;
+        player.y = FIELD_HEIGHT / 2 - PLAYER_SIZE / 2;
       } else {
-        player.x = FIELD_WIDTH - 140;
-        player.y = 100 + Math.random() * (FIELD_HEIGHT - PLAYER_SIZE);
+        player.x = FIELD_WIDTH - 90;
+        player.y = FIELD_HEIGHT / 2 - PLAYER_SIZE / 2;
       }
 
-      // Oyuncuları gönder
       room.broadcast({
         type: "players",
         players: Array.from(room.players.values()).map(p => ({
           nickname: p.nickname,
           x: p.x,
-          y: p.y
+          y: p.y,
+          team: p.team
         }))
       });
     }
@@ -185,12 +192,10 @@ wss.on("connection", (ws) => {
       currentPlayer.y = Math.min(Math.max(0, data.y), FIELD_HEIGHT - PLAYER_SIZE);
 
       if (data.action === "kick") {
-        // Eğer topa yakınsa, topa vur
         const distX = currentPlayer.x + PLAYER_SIZE / 2 - (room.ball.x + BALL_SIZE / 2);
         const distY = currentPlayer.y + PLAYER_SIZE / 2 - (room.ball.y + BALL_SIZE / 2);
         const dist = Math.sqrt(distX * distX + distY * distY);
         if (dist < 80) {
-          // Topa kuvvet uygula
           room.ball.vx = distX * 0.7;
           room.ball.vy = distY * 0.7;
         }
@@ -201,6 +206,15 @@ wss.on("connection", (ws) => {
   ws.on("close", () => {
     if (currentPlayer && currentPlayer.room) {
       currentPlayer.room.players.delete(ws);
+      currentPlayer.room.broadcast({
+        type: "players",
+        players: Array.from(currentPlayer.room.players.values()).map(p => ({
+          nickname: p.nickname,
+          x: p.x,
+          y: p.y,
+          team: p.team
+        }))
+      });
     }
   });
 });
