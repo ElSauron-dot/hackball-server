@@ -1,61 +1,117 @@
-const WebSocket = require("ws");
-const http = require("http");
+const express = require("express");
+const app = express();
+const http = require("http").createServer(app);
+const io = require("socket.io")(http);
 
-const server = http.createServer();
-const wss = new WebSocket.Server({ server });
+app.use(express.static(__dirname));
 
 let parties = {};
 
-wss.on("connection", (ws) => {
-  let playerData = {};
+io.on("connection", (socket) => {
+  socket.on("join", ({ nickname, partyId, team }) => {
+    if (!parties[partyId]) {
+      parties[partyId] = {
+        players: {},
+        ball: { x: 450, y: 250, vx: 0, vy: 0 },
+        host: socket.id,
+      };
+    }
 
-  ws.on("message", (message) => {
-    try {
-      const data = JSON.parse(message);
+    parties[partyId].players[socket.id] = {
+      id: socket.id,
+      nickname,
+      x: 100,
+      y: 100,
+      team,
+    };
 
-      if (data.type === "join") {
-        const { nickname, partyId, team } = data;
-        playerData = { ws, nickname, partyId, team };
+    socket.join(partyId);
+    socket.emit("init", {
+      id: socket.id,
+      players: parties[partyId].players,
+      ball: parties[partyId].ball,
+      isHost: parties[partyId].host === socket.id,
+    });
 
-        if (!parties[partyId]) {
-          parties[partyId] = { players: [], host: nickname };
-        }
+    io.to(partyId).emit("state", {
+      players: parties[partyId].players,
+      ball: parties[partyId].ball,
+    });
 
-        parties[partyId].players.push(playerData);
+    io.to(partyId).emit("partyId", partyId);
+    io.to(partyId).emit("updatePlayers", parties[partyId].players);
+  });
 
-        broadcast(partyId, {
-          type: "playersUpdate",
-          players: parties[partyId].players.map(p => ({
-            nickname: p.nickname,
-            team: p.team
-          }))
+  socket.on("move", ({ x, y }) => {
+    for (const id in parties) {
+      if (parties[id].players[socket.id]) {
+        parties[id].players[socket.id].x = x;
+        parties[id].players[socket.id].y = y;
+        io.to(id).emit("state", {
+          players: parties[id].players,
+          ball: parties[id].ball,
         });
       }
-    } catch (err) {
-      console.error("Error:", err);
     }
   });
 
-  ws.on("close", () => {
-    const { partyId } = playerData;
-    if (parties[partyId]) {
-      parties[partyId].players = parties[partyId].players.filter(p => p.ws !== ws);
-      if (parties[partyId].players.length === 0) delete parties[partyId];
+  socket.on("kick", ({ vx, vy }) => {
+    for (const id in parties) {
+      if (parties[id].players[socket.id]) {
+        parties[id].ball.vx = vx;
+        parties[id].ball.vy = vy;
+      }
+    }
+  });
+
+  socket.on("setTeam", ({ id, team }) => {
+    for (const pid in parties) {
+      if (parties[pid].players[socket.id] && parties[pid].host === socket.id) {
+        if (parties[pid].players[id]) {
+          parties[pid].players[id].team = team;
+          io.to(pid).emit("updatePlayers", parties[pid].players);
+        }
+      }
+    }
+  });
+
+  socket.on("kick", (id) => {
+    for (const pid in parties) {
+      if (parties[pid].host === socket.id && parties[pid].players[id]) {
+        io.to(id).emit("disconnect");
+        delete parties[pid].players[id];
+        io.to(pid).emit("updatePlayers", parties[pid].players);
+      }
+    }
+  });
+
+  socket.on("disconnect", () => {
+    for (const id in parties) {
+      if (parties[id].players[socket.id]) {
+        delete parties[id].players[socket.id];
+        io.to(id).emit("updatePlayers", parties[id].players);
+      }
     }
   });
 });
 
-function broadcast(partyId, msg) {
-  if (!parties[partyId]) return;
-  const str = JSON.stringify(msg);
-  parties[partyId].players.forEach(p => {
-    if (p.ws.readyState === WebSocket.OPEN) {
-      p.ws.send(str);
-    }
-  });
-}
+setInterval(() => {
+  for (const id in parties) {
+    const ball = parties[id].ball;
+    ball.x += ball.vx;
+    ball.y += ball.vy;
+    ball.vx *= 0.98;
+    ball.vy *= 0.98;
+    if (ball.x < 10 || ball.x > 890) ball.vx *= -1;
+    if (ball.y < 10 || ball.y > 490) ball.vy *= -1;
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`✅ HackBall sunucusu ${PORT} portunda çalışıyor`);
+    io.to(id).emit("state", {
+      players: parties[id].players,
+      ball: parties[id].ball,
+    });
+  }
+}, 1000 / 50);
+
+http.listen(3000, () => {
+  console.log("HackBall sunucusu 3000 portunda çalışıyor");
 });
