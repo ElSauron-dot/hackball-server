@@ -8,166 +8,124 @@ const io = new Server(server);
 
 const PORT = process.env.PORT || 3000;
 
-app.use(express.static(__dirname + "/"));
+app.use(express.static("public"));
 
-let parties = {};
-
-function createPartyId() {
-  return Math.random().toString(36).substr(2, 6).toUpperCase();
-}
-
-function getInitialPlayer(id, name, team) {
-  return {
-    id,
-    name,
-    x: Math.random() * 600 + 100,
-    y: Math.random() * 300 + 100,
-    team,
+let players = {};
+let ball = {
+    x: 400,
+    y: 300,
     vx: 0,
     vy: 0,
-    isLeader: false,
-  };
-}
+    radius: 10
+};
 
+let scores = {
+    red: 0,
+    blue: 0
+};
+
+// ⚽ Kale bölgeleri (solda ve sağda)
+const goalSize = { width: 40, height: 200 };
+const field = { width: 800, height: 600 };
+
+// 🎮 Yeni oyuncu bağlanınca
 io.on("connection", (socket) => {
-  console.log("Yeni bağlantı: " + socket.id);
+    console.log("Yeni oyuncu:", socket.id);
 
-  socket.on("createParty", ({ name, team }) => {
-    const partyId = createPartyId();
-    parties[partyId] = {
-      id: partyId,
-      players: {},
-      ball: { x: 400, y: 300, vx: 0, vy: 0 },
-      leader: socket.id,
-      startTime: Date.now()
+    const color = Object.keys(players).length % 2 === 0 ? "red" : "blue";
+
+    players[socket.id] = {
+        x: Math.random() * 700 + 50,
+        y: Math.random() * 500 + 50,
+        color: color
     };
 
-    const player = getInitialPlayer(socket.id, name, team);
-    player.isLeader = true;
+    // Yeni oyuncuya tüm başlangıç verilerini gönder
+    socket.emit("init", {
+        id: socket.id,
+        players,
+        ball,
+        scores
+    });
 
-    parties[partyId].players[socket.id] = player;
-    socket.join(partyId);
-    socket.partyId = partyId;
+    // Diğer oyunculara bildir
+    socket.broadcast.emit("playerJoined", {
+        id: socket.id,
+        data: players[socket.id]
+    });
 
-    io.to(partyId).emit("partyData", parties[partyId]);
-  });
-
-  socket.on("joinParty", ({ name, team, partyId }) => {
-    if (!parties[partyId]) {
-      socket.emit("errorMsg", "Parti bulunamadı!");
-      return;
-    }
-
-    const player = getInitialPlayer(socket.id, name, team);
-    parties[partyId].players[socket.id] = player;
-    socket.join(partyId);
-    socket.partyId = partyId;
-
-    io.to(partyId).emit("partyData", parties[partyId]);
-  });
-
-  socket.on("move", ({ x, y }) => {
-    const partyId = socket.partyId;
-    if (parties[partyId] && parties[partyId].players[socket.id]) {
-      const player = parties[partyId].players[socket.id];
-      player.x = x;
-      player.y = y;
-    }
-  });
-
-  socket.on("kickBall", ({ forceX, forceY }) => {
-    const partyId = socket.partyId;
-    if (parties[partyId]) {
-      parties[partyId].ball.vx += forceX;
-      parties[partyId].ball.vy += forceY;
-    }
-  });
-
-  socket.on("changeTeam", ({ playerId, team }) => {
-    const partyId = socket.partyId;
-    if (
-      parties[partyId] &&
-      socket.id === parties[partyId].leader &&
-      parties[partyId].players[playerId]
-    ) {
-      parties[partyId].players[playerId].team = team;
-      io.to(partyId).emit("partyData", parties[partyId]);
-    }
-  });
-
-  socket.on("kickPlayer", ({ playerId }) => {
-    const partyId = socket.partyId;
-    if (
-      parties[partyId] &&
-      socket.id === parties[partyId].leader &&
-      parties[partyId].players[playerId]
-    ) {
-      io.to(playerId).emit("kicked");
-      delete parties[partyId].players[playerId];
-      io.to(partyId).emit("partyData", parties[partyId]);
-    }
-  });
-
-  socket.on("transferLeadership", ({ newLeaderId }) => {
-    const partyId = socket.partyId;
-    if (
-      parties[partyId] &&
-      socket.id === parties[partyId].leader &&
-      parties[partyId].players[newLeaderId]
-    ) {
-      parties[partyId].leader = newLeaderId;
-      for (let id in parties[partyId].players) {
-        parties[partyId].players[id].isLeader = id === newLeaderId;
-      }
-      io.to(partyId).emit("partyData", parties[partyId]);
-    }
-  });
-
-  socket.on("disconnect", () => {
-    const partyId = socket.partyId;
-    if (parties[partyId]) {
-      delete parties[partyId].players[socket.id];
-      if (Object.keys(parties[partyId].players).length === 0) {
-        delete parties[partyId];
-      } else {
-        // lider çıktıysa yeni bir lider ata
-        if (parties[partyId].leader === socket.id) {
-          const newLeaderId = Object.keys(parties[partyId].players)[0];
-          parties[partyId].leader = newLeaderId;
-          parties[partyId].players[newLeaderId].isLeader = true;
+    // Hareket güncelleme
+    socket.on("move", (pos) => {
+        if (players[socket.id]) {
+            players[socket.id].x = pos.x;
+            players[socket.id].y = pos.y;
         }
-        io.to(partyId).emit("partyData", parties[partyId]);
-      }
-    }
-  });
+    });
+
+    // Bağlantı kesilince
+    socket.on("disconnect", () => {
+        console.log("Oyuncu ayrıldı:", socket.id);
+        delete players[socket.id];
+        io.emit("playerLeft", socket.id);
+    });
 });
 
+// ⏱ Fizik güncelleme döngüsü (60 FPS)
 setInterval(() => {
-  for (let partyId in parties) {
-    const party = parties[partyId];
-    const ball = party.ball;
-
-    // Basit top fiziği
+    // Topu hareket ettir
     ball.x += ball.vx;
     ball.y += ball.vy;
+
+    // Sürtünme (yavaşlatma)
     ball.vx *= 0.98;
     ball.vy *= 0.98;
 
-    // Duvar çarpması
-    if (ball.x < 0 || ball.x > 800) ball.vx *= -1;
-    if (ball.y < 0 || ball.y > 600) ball.vy *= -1;
-
-    // Maç süresi kontrol
-    const now = Date.now();
-    if (now - party.startTime >= 6 * 60 * 1000) {
-      io.to(partyId).emit("matchEnd");
-      party.startTime = now;
+    // Sınır çarpması
+    if (ball.x < ball.radius || ball.x > field.width - ball.radius) {
+        ball.vx *= -1;
+    }
+    if (ball.y < ball.radius || ball.y > field.height - ball.radius) {
+        ball.vy *= -1;
     }
 
-    io.to(partyId).emit("gameState", party);
-  }
+    // Kale kontrolü
+    if (ball.x < goalSize.width && ball.y > 200 && ball.y < 400) {
+        scores.blue++;
+        resetBall();
+    } else if (ball.x > field.width - goalSize.width && ball.y > 200 && ball.y < 400) {
+        scores.red++;
+        resetBall();
+    }
+
+    // Oyuncularla top çarpışması
+    for (let id in players) {
+        const p = players[id];
+        const dx = ball.x - p.x;
+        const dy = ball.y - p.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 20 + ball.radius) {
+            const angle = Math.atan2(dy, dx);
+            ball.vx += Math.cos(angle) * 2;
+            ball.vy += Math.sin(angle) * 2;
+        }
+    }
+
+    // Tüm istemcilere gönder
+    io.emit("state", {
+        players,
+        ball,
+        scores
+    });
 }, 1000 / 60);
 
+// Gol sonrası topu ortala
+function resetBall() {
+    ball.x = field.width / 2;
+    ball.y = field.height / 2;
+    ball.vx = 0;
+    ball.vy = 0;
+}
+
 server.listen(PORT, () => {
-  console.log(`Server ${PORT} portunda çalışıyor...`);
+    console.log("HackBall sunucusu çalışıyor:", PORT);
 });
