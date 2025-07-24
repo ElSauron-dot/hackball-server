@@ -1,117 +1,99 @@
 const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
 const app = express();
-const http = require("http").createServer(app);
-const io = require("socket.io")(http);
+const server = http.createServer(app);
+const io = new Server(server);
 
 app.use(express.static(__dirname));
 
 let parties = {};
 
 io.on("connection", (socket) => {
-  socket.on("join", ({ nickname, partyId, team }) => {
-    if (!parties[partyId]) {
-      parties[partyId] = {
-        players: {},
-        ball: { x: 450, y: 250, vx: 0, vy: 0 },
-        host: socket.id,
-      };
-    }
-
-    parties[partyId].players[socket.id] = {
-      id: socket.id,
-      nickname,
-      x: 100,
-      y: 100,
-      team,
+  socket.on("createParty", ({ nickname, team }) => {
+    const partyId = Math.random().toString(36).substr(2, 6);
+    parties[partyId] = {
+      leaderId: socket.id,
+      players: {}
     };
-
+    const player = { id: socket.id, x: 500, y: 300, team, nickname, partyId };
+    parties[partyId].players[socket.id] = player;
     socket.join(partyId);
-    socket.emit("init", {
-      id: socket.id,
-      players: parties[partyId].players,
-      ball: parties[partyId].ball,
-      isHost: parties[partyId].host === socket.id,
-    });
-
-    io.to(partyId).emit("state", {
-      players: parties[partyId].players,
-      ball: parties[partyId].ball,
-    });
-
-    io.to(partyId).emit("partyId", partyId);
-    io.to(partyId).emit("updatePlayers", parties[partyId].players);
+    socket.emit("startGame", { player, players: parties[partyId].players });
   });
 
-  socket.on("move", ({ x, y }) => {
-    for (const id in parties) {
-      if (parties[id].players[socket.id]) {
-        parties[id].players[socket.id].x = x;
-        parties[id].players[socket.id].y = y;
-        io.to(id).emit("state", {
-          players: parties[id].players,
-          ball: parties[id].ball,
+  socket.on("joinParty", ({ nickname, team, partyId }) => {
+    if (!parties[partyId]) return;
+    const player = { id: socket.id, x: 500, y: 300, team, nickname, partyId };
+    parties[partyId].players[socket.id] = player;
+    socket.join(partyId);
+    io.to(partyId).emit("updateState", {
+      players: parties[partyId].players,
+      ball: { x: 500, y: 300, vx: 0, vy: 0 }
+    });
+    socket.emit("startGame", { player, players: parties[partyId].players });
+    io.to(partyId).emit("updateLeader", parties[partyId].leaderId);
+  });
+
+  socket.on("playerMove", ({ x, y }) => {
+    for (let partyId in parties) {
+      const party = parties[partyId];
+      if (party.players[socket.id]) {
+        party.players[socket.id].x = x;
+        party.players[socket.id].y = y;
+        io.to(partyId).emit("updateState", {
+          players: party.players,
+          ball: { x: 500, y: 300, vx: 0, vy: 0 }
         });
       }
     }
   });
 
-  socket.on("kick", ({ vx, vy }) => {
-    for (const id in parties) {
-      if (parties[id].players[socket.id]) {
-        parties[id].ball.vx = vx;
-        parties[id].ball.vy = vy;
+  socket.on("changeTeam", ({ playerId, team }) => {
+    for (let partyId in parties) {
+      if (parties[partyId].leaderId === socket.id) {
+        const p = parties[partyId].players[playerId];
+        if (p) p.team = team;
+        io.to(partyId).emit("updateState", {
+          players: parties[partyId].players,
+          ball: { x: 500, y: 300, vx: 0, vy: 0 }
+        });
       }
     }
   });
 
-  socket.on("setTeam", ({ id, team }) => {
-    for (const pid in parties) {
-      if (parties[pid].players[socket.id] && parties[pid].host === socket.id) {
-        if (parties[pid].players[id]) {
-          parties[pid].players[id].team = team;
-          io.to(pid).emit("updatePlayers", parties[pid].players);
-        }
-      }
-    }
-  });
-
-  socket.on("kick", (id) => {
-    for (const pid in parties) {
-      if (parties[pid].host === socket.id && parties[pid].players[id]) {
-        io.to(id).emit("disconnect");
-        delete parties[pid].players[id];
-        io.to(pid).emit("updatePlayers", parties[pid].players);
+  socket.on("kickPlayer", (playerId) => {
+    for (let partyId in parties) {
+      if (parties[partyId].leaderId === socket.id) {
+        delete parties[partyId].players[playerId];
+        io.to(partyId).emit("updateState", {
+          players: parties[partyId].players,
+          ball: { x: 500, y: 300, vx: 0, vy: 0 }
+        });
       }
     }
   });
 
   socket.on("disconnect", () => {
-    for (const id in parties) {
-      if (parties[id].players[socket.id]) {
-        delete parties[id].players[socket.id];
-        io.to(id).emit("updatePlayers", parties[id].players);
+    for (let partyId in parties) {
+      const party = parties[partyId];
+      if (party.players[socket.id]) {
+        delete party.players[socket.id];
+        if (party.leaderId === socket.id) {
+          const remaining = Object.keys(party.players);
+          party.leaderId = remaining[0] || null;
+          if (party.leaderId)
+            io.to(partyId).emit("updateLeader", party.leaderId);
+        }
+        io.to(partyId).emit("updateState", {
+          players: party.players,
+          ball: { x: 500, y: 300, vx: 0, vy: 0 }
+        });
       }
     }
   });
 });
 
-setInterval(() => {
-  for (const id in parties) {
-    const ball = parties[id].ball;
-    ball.x += ball.vx;
-    ball.y += ball.vy;
-    ball.vx *= 0.98;
-    ball.vy *= 0.98;
-    if (ball.x < 10 || ball.x > 890) ball.vx *= -1;
-    if (ball.y < 10 || ball.y > 490) ball.vy *= -1;
-
-    io.to(id).emit("state", {
-      players: parties[id].players,
-      ball: parties[id].ball,
-    });
-  }
-}, 1000 / 50);
-
-http.listen(3000, () => {
-  console.log("HackBall sunucusu 3000 portunda çalışıyor");
+server.listen(3000, () => {
+  console.log("Server ready on http://localhost:3000");
 });
