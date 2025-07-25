@@ -5,10 +5,11 @@ const FPS = 60;
 const FIELD_WIDTH = 600;
 const FIELD_HEIGHT = 400;
 const GOAL_WIDTH = 100;
-const FRICTION = 0.9; // top sürerken daha yumuşak yavaşlama
-const KICK_POWER = 12;
-const PLAYER_SPEED_BASE = 4;
-const PLAYER_SPEED = PLAYER_SPEED_BASE * 0.6;
+
+const FRICTION = 0.85;
+const KICK_POWER = 15;
+const PLAYER_BASE_SPEED = 4;
+const PLAYER_SPEED = PLAYER_BASE_SPEED * 0.6;
 
 let rooms = {};
 let scores = {};
@@ -35,16 +36,18 @@ function resetBall(roomId) {
 
 function updateBall(roomId) {
   const ball = balls[roomId];
+
   ball.x += ball.vx;
   ball.y += ball.vy;
 
   ball.vx *= FRICTION;
   ball.vy *= FRICTION;
 
-  // Sadece sınırlar, top sekmiyor
+  // Y sınırı
   if (ball.y < ball.radius) ball.y = ball.radius;
   if (ball.y > FIELD_HEIGHT - ball.radius) ball.y = FIELD_HEIGHT - ball.radius;
 
+  // Skor kontrolü
   if (
     ball.x - ball.radius <= 0 &&
     ball.y > FIELD_HEIGHT / 2 - GOAL_WIDTH / 2 &&
@@ -89,23 +92,16 @@ function gameLoop(roomId) {
     const dy = ball.y - player.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
 
+    // Top oyuncuya yakınsa topu sür
     if (dist < ball.radius + player.radius + 5) {
       const speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
-      if (speed > 0.01) {
-        const dirX = player.vx / speed;
-        const dirY = player.vy / speed;
-
-        ball.x = player.x + dirX * (player.radius + ball.radius + 1);
-        ball.y = player.y + dirY * (player.radius + ball.radius + 1);
-
-        ball.vx = player.vx * 0.7;
-        ball.vy = player.vy * 0.7;
-      } else {
-        ball.x = player.x;
-        ball.y = player.y - (player.radius + ball.radius + 1);
-
-        ball.vx = 0;
-        ball.vy = 0;
+      if (speed > 0.1) {
+        // Top, oyuncu hızının %80'i kadar sürülüyor
+        ball.vx = player.vx * 0.8;
+        ball.vy = player.vy * 0.8;
+        // Top, oyuncunun biraz önünde kalıyor
+        ball.x = player.x + (dx / dist) * (player.radius + ball.radius + 1);
+        ball.y = player.y + (dy / dist) * (player.radius + ball.radius + 1);
       }
     }
   });
@@ -173,12 +169,21 @@ server.on('connection', ws => {
           player.vx = 0;
           player.vy = 0;
         }
-        return;
       }
 
       if (data.type === 'kick') {
-        // Kick işlevsiz bırakıldı, istersen eklersin
-        return;
+        const ball = balls[currentRoom];
+        const dx = ball.x - player.x;
+        const dy = ball.y - player.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist < ball.radius + player.radius + 10) {
+          // Yönü topa doğru ayarla ve kuvvetli bir şut ver
+          const dirX = dx / dist;
+          const dirY = dy / dist;
+          ball.vx = dirX * KICK_POWER;
+          ball.vy = dirY * KICK_POWER;
+        }
       }
 
       if (player.isHost) {
