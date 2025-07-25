@@ -7,7 +7,8 @@ const FIELD_HEIGHT = 400;
 const GOAL_WIDTH = 100;
 const FRICTION = 0.85;
 const KICK_POWER = 14;
-const PLAYER_SPEED = 4;
+const PLAYER_SPEED_BASE = 4;
+const PLAYER_SPEED = PLAYER_SPEED_BASE * 0.6; // %60 hız
 
 let rooms = {};
 let scores = {};
@@ -40,7 +41,6 @@ function updateBall(roomId) {
   ball.vx *= FRICTION;
   ball.vy *= FRICTION;
 
-  // Y sınırları
   if (ball.y < ball.radius) {
     ball.y = ball.radius;
     ball.vy = -ball.vy * 0.7;
@@ -50,7 +50,6 @@ function updateBall(roomId) {
     ball.vy = -ball.vy * 0.7;
   }
 
-  // Goller ve skorlar
   if (
     ball.x - ball.radius <= 0 &&
     ball.y > FIELD_HEIGHT / 2 - GOAL_WIDTH / 2 &&
@@ -69,7 +68,6 @@ function updateBall(roomId) {
     resetBall(roomId);
   }
 
-  // X sınırları (duvarlara çarpma)
   if (ball.x < ball.radius) {
     ball.x = ball.radius;
     ball.vx = -ball.vx * 0.7;
@@ -82,15 +80,12 @@ function updateBall(roomId) {
 
 function updatePlayers(roomId) {
   rooms[roomId].forEach(player => {
-    // Hareket hızını uygula
     if (!player.vx) player.vx = 0;
     if (!player.vy) player.vy = 0;
 
-    // Yavaşlatma (örneğin topa yaklaştıkça yavaşlama yapılabilir, burada sabit)
     player.x += player.vx;
     player.y += player.vy;
 
-    // Sınırlar
     player.x = Math.min(Math.max(player.radius, player.x), FIELD_WIDTH - player.radius);
     player.y = Math.min(Math.max(player.radius, player.y), FIELD_HEIGHT - player.radius);
   });
@@ -110,31 +105,25 @@ function gameLoop(roomId) {
     const dist = Math.sqrt(dx * dx + dy * dy);
 
     if (dist < ball.radius + player.radius + 5) {
-      // Top sürme mekaniği:
-      const ballSpeed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
       const playerSpeed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
+      const nx = dx / dist;
+      const ny = dy / dist;
 
-      if (ballSpeed < 3 && playerSpeed > 0.1) {
-        // Topu oyuncunun hızına yakın tut
-        ball.vx = player.vx * 0.9;
-        ball.vy = player.vy * 0.9;
+      if (playerSpeed < 1) {
+        ball.vx = player.vx * 0.6;
+        ball.vy = player.vy * 0.6;
 
-        // Topu oyuncunun önünde konumlandır
-        const nx = dx / dist;
-        const ny = dy / dist;
         ball.x = player.x + nx * (player.radius + ball.radius + 1);
         ball.y = player.y + ny * (player.radius + ball.radius + 1);
-      } else if (playerSpeed > 0.1) {
-        // Top hızlıysa sekme
-        const nx = dx / dist;
-        const ny = dy / dist;
-        ball.vx = nx * KICK_POWER;
-        ball.vy = ny * KICK_POWER;
+
+      } else {
+        const kickPower = KICK_POWER * (playerSpeed / PLAYER_SPEED_BASE);
+        ball.vx = nx * kickPower;
+        ball.vy = ny * kickPower;
       }
     }
   });
 
-  // Skor, top ve oyuncuları tüm odadakilere yolla
   const playersData = rooms[roomId].map(p => ({
     id: p.id,
     x: p.x,
@@ -202,12 +191,10 @@ server.on('connection', ws => {
       }
 
       if (data.type === 'kick') {
-        // Topa vurma burada oyunun içinde zaten var.
-        // Burada ekstra işlem yapmaya gerek yok.
+        // Topa ekstra kuvvet verme mekanizması istersen buraya ekleyebilirsin
         return;
       }
 
-      // Yönetici işlemleri
       if (player.isHost) {
         if (data.type === 'changeTeam') {
           const target = rooms[currentRoom].find(p => p.id === data.target);
@@ -223,7 +210,6 @@ server.on('connection', ws => {
           return;
         }
       }
-
     } catch (e) {
       console.error('Hatalı mesaj:', e);
     }
