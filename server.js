@@ -5,10 +5,10 @@ const FPS = 60;
 const FIELD_WIDTH = 600;
 const FIELD_HEIGHT = 400;
 const GOAL_WIDTH = 100;
-const FRICTION = 0.85;
-const KICK_POWER = 14;
+const FRICTION = 0.9; // daha yumuşak yavaşlama
+const KICK_POWER = 12;
 const PLAYER_SPEED_BASE = 4;
-const PLAYER_SPEED = PLAYER_SPEED_BASE * 0.6; // %60 hız
+const PLAYER_SPEED = PLAYER_SPEED_BASE * 0.6;
 
 let rooms = {};
 let scores = {};
@@ -41,15 +41,11 @@ function updateBall(roomId) {
   ball.vx *= FRICTION;
   ball.vy *= FRICTION;
 
-  if (ball.y < ball.radius) {
-    ball.y = ball.radius;
-    ball.vy = -ball.vy * 0.7;
-  }
-  if (ball.y > FIELD_HEIGHT - ball.radius) {
-    ball.y = FIELD_HEIGHT - ball.radius;
-    ball.vy = -ball.vy * 0.7;
-  }
+  // Yatay sınırlar (top sekmesin, sadece kenarda duracak)
+  if (ball.y < ball.radius) ball.y = ball.radius;
+  if (ball.y > FIELD_HEIGHT - ball.radius) ball.y = FIELD_HEIGHT - ball.radius;
 
+  // Goller
   if (
     ball.x - ball.radius <= 0 &&
     ball.y > FIELD_HEIGHT / 2 - GOAL_WIDTH / 2 &&
@@ -58,7 +54,6 @@ function updateBall(roomId) {
     scores[roomId].team2++;
     resetBall(roomId);
   }
-
   if (
     ball.x + ball.radius >= FIELD_WIDTH &&
     ball.y > FIELD_HEIGHT / 2 - GOAL_WIDTH / 2 &&
@@ -68,21 +63,13 @@ function updateBall(roomId) {
     resetBall(roomId);
   }
 
-  if (ball.x < ball.radius) {
-    ball.x = ball.radius;
-    ball.vx = -ball.vx * 0.7;
-  }
-  if (ball.x > FIELD_WIDTH - ball.radius) {
-    ball.x = FIELD_WIDTH - ball.radius;
-    ball.vx = -ball.vx * 0.7;
-  }
+  // Dikey sınırlar (top sekmesin)
+  if (ball.x < ball.radius) ball.x = ball.radius;
+  if (ball.x > FIELD_WIDTH - ball.radius) ball.x = FIELD_WIDTH - ball.radius;
 }
 
 function updatePlayers(roomId) {
   rooms[roomId].forEach(player => {
-    if (!player.vx) player.vx = 0;
-    if (!player.vy) player.vy = 0;
-
     player.x += player.vx;
     player.y += player.vy;
 
@@ -109,18 +96,13 @@ function gameLoop(roomId) {
       const nx = dx / dist;
       const ny = dy / dist;
 
-      if (playerSpeed < 1) {
-        ball.vx = player.vx * 0.6;
-        ball.vy = player.vy * 0.6;
+      // Top hiç sekmesin, sadece sürülecek
+      ball.vx = player.vx * 0.7;
+      ball.vy = player.vy * 0.7;
 
-        ball.x = player.x + nx * (player.radius + ball.radius + 1);
-        ball.y = player.y + ny * (player.radius + ball.radius + 1);
-
-      } else {
-        const kickPower = KICK_POWER * (playerSpeed / PLAYER_SPEED_BASE);
-        ball.vx = nx * kickPower;
-        ball.vy = ny * kickPower;
-      }
+      // Top oyuncunun önünde sabitlensin
+      ball.x = player.x + nx * (player.radius + ball.radius + 1);
+      ball.y = player.y + ny * (player.radius + ball.radius + 1);
     }
   });
 
@@ -191,7 +173,7 @@ server.on('connection', ws => {
       }
 
       if (data.type === 'kick') {
-        // Topa ekstra kuvvet verme mekanizması istersen buraya ekleyebilirsin
+        // Kick butonu şu an işlevsiz bırakıldı, dilersen özelleştirebilirsin
         return;
       }
 
