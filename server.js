@@ -5,7 +5,7 @@ const FPS = 60;
 const FIELD_WIDTH = 600;
 const FIELD_HEIGHT = 400;
 const GOAL_WIDTH = 100;
-const FRICTION = 0.9; // daha yumuşak yavaşlama
+const FRICTION = 0.9; // top sürerken daha yumuşak yavaşlama
 const KICK_POWER = 12;
 const PLAYER_SPEED_BASE = 4;
 const PLAYER_SPEED = PLAYER_SPEED_BASE * 0.6;
@@ -41,11 +41,10 @@ function updateBall(roomId) {
   ball.vx *= FRICTION;
   ball.vy *= FRICTION;
 
-  // Yatay sınırlar (top sekmesin, sadece kenarda duracak)
+  // Sadece sınırlar, top sekmiyor
   if (ball.y < ball.radius) ball.y = ball.radius;
   if (ball.y > FIELD_HEIGHT - ball.radius) ball.y = FIELD_HEIGHT - ball.radius;
 
-  // Goller
   if (
     ball.x - ball.radius <= 0 &&
     ball.y > FIELD_HEIGHT / 2 - GOAL_WIDTH / 2 &&
@@ -63,7 +62,6 @@ function updateBall(roomId) {
     resetBall(roomId);
   }
 
-  // Dikey sınırlar (top sekmesin)
   if (ball.x < ball.radius) ball.x = ball.radius;
   if (ball.x > FIELD_WIDTH - ball.radius) ball.x = FIELD_WIDTH - ball.radius;
 }
@@ -92,17 +90,23 @@ function gameLoop(roomId) {
     const dist = Math.sqrt(dx * dx + dy * dy);
 
     if (dist < ball.radius + player.radius + 5) {
-      const playerSpeed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
-      const nx = dx / dist;
-      const ny = dy / dist;
+      const speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
+      if (speed > 0.01) {
+        const dirX = player.vx / speed;
+        const dirY = player.vy / speed;
 
-      // Top hiç sekmesin, sadece sürülecek
-      ball.vx = player.vx * 0.7;
-      ball.vy = player.vy * 0.7;
+        ball.x = player.x + dirX * (player.radius + ball.radius + 1);
+        ball.y = player.y + dirY * (player.radius + ball.radius + 1);
 
-      // Top oyuncunun önünde sabitlensin
-      ball.x = player.x + nx * (player.radius + ball.radius + 1);
-      ball.y = player.y + ny * (player.radius + ball.radius + 1);
+        ball.vx = player.vx * 0.7;
+        ball.vy = player.vy * 0.7;
+      } else {
+        ball.x = player.x;
+        ball.y = player.y - (player.radius + ball.radius + 1);
+
+        ball.vx = 0;
+        ball.vy = 0;
+      }
     }
   });
 
@@ -173,7 +177,7 @@ server.on('connection', ws => {
       }
 
       if (data.type === 'kick') {
-        // Kick butonu şu an işlevsiz bırakıldı, dilersen özelleştirebilirsin
+        // Kick işlevsiz bırakıldı, istersen eklersin
         return;
       }
 
