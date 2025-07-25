@@ -1,31 +1,19 @@
 const WebSocket = require('ws');
 const server = new WebSocket.Server({ port: 3000 });
 
-const FPS = 60;
+const rooms = {};
+const scores = {};
+
 const FIELD_WIDTH = 600;
 const FIELD_HEIGHT = 400;
 const GOAL_WIDTH = 100;
 
 const FRICTION = 0.85;
 const KICK_POWER = 15;
-const PLAYER_BASE_SPEED = 4;
-const PLAYER_SPEED = PLAYER_BASE_SPEED * 0.6;
+const MAX_PLAYER_SPEED = 3;
 
-let rooms = {};
-let scores = {};
-let balls = {};
-let intervals = {};
-
-function broadcast(roomId, data) {
-  if (!rooms[roomId]) return;
-  const msg = JSON.stringify(data);
-  rooms[roomId].forEach(p => {
-    if (p.ws.readyState === 1) p.ws.send(msg);
-  });
-}
-
-function resetBall(roomId) {
-  balls[roomId] = {
+function resetBall() {
+  return {
     x: FIELD_WIDTH / 2,
     y: FIELD_HEIGHT / 2,
     vx: 0,
@@ -34,188 +22,183 @@ function resetBall(roomId) {
   };
 }
 
+const balls = {}; // Oda bazlı top
+
+function broadcast(roomId, data) {
+  if (!rooms[roomId]) return;
+  const msg = JSON.stringify(data);
+  for (const player of rooms[roomId]) {
+    if (player.ws.readyState === 1) {
+      player.ws.send(msg);
+    }
+  }
+}
+
 function updateBall(roomId) {
-  const ball = balls[roomId];
+  if (!balls[roomId]) return;
+  let ball = balls[roomId];
 
   ball.x += ball.vx;
   ball.y += ball.vy;
 
+  // Hızı azalt ama çok yavaşlayınca durdur
   ball.vx *= FRICTION;
   ball.vy *= FRICTION;
+  if (Math.abs(ball.vx) < 0.05) ball.vx = 0;
+  if (Math.abs(ball.vy) < 0.05) ball.vy = 0;
 
-  // Y sınırı
-  if (ball.y < ball.radius) ball.y = ball.radius;
-  if (ball.y > FIELD_HEIGHT - ball.radius) ball.y = FIELD_HEIGHT - ball.radius;
+  // Duvarlara çarpma (top sektirme yerine duracak)
+  if (ball.y < ball.radius) {
+    ball.y = ball.radius;
+    ball.vy = 0;
+  }
+  if (ball.y > FIELD_HEIGHT - ball.radius) {
+    ball.y = FIELD_HEIGHT - ball.radius;
+    ball.vy = 0;
+  }
 
-  // Skor kontrolü
+  // Kale kontrolü ve skor
   if (
     ball.x - ball.radius <= 0 &&
     ball.y > FIELD_HEIGHT / 2 - GOAL_WIDTH / 2 &&
     ball.y < FIELD_HEIGHT / 2 + GOAL_WIDTH / 2
   ) {
     scores[roomId].team2++;
-    resetBall(roomId);
+    balls[roomId] = resetBall();
   }
+
   if (
     ball.x + ball.radius >= FIELD_WIDTH &&
     ball.y > FIELD_HEIGHT / 2 - GOAL_WIDTH / 2 &&
     ball.y < FIELD_HEIGHT / 2 + GOAL_WIDTH / 2
   ) {
     scores[roomId].team1++;
-    resetBall(roomId);
+    balls[roomId] = resetBall();
   }
 
-  if (ball.x < ball.radius) ball.x = ball.radius;
-  if (ball.x > FIELD_WIDTH - ball.radius) ball.x = FIELD_WIDTH - ball.radius;
-}
-
-function updatePlayers(roomId) {
-  rooms[roomId].forEach(player => {
-    player.x += player.vx;
-    player.y += player.vy;
-
-    player.x = Math.min(Math.max(player.radius, player.x), FIELD_WIDTH - player.radius);
-    player.y = Math.min(Math.max(player.radius, player.y), FIELD_HEIGHT - player.radius);
-  });
-}
-
-function gameLoop(roomId) {
-  if (!rooms[roomId]) return;
-
-  updatePlayers(roomId);
-  updateBall(roomId);
-
-  const ball = balls[roomId];
-
-  rooms[roomId].forEach(player => {
-    const dx = ball.x - player.x;
-    const dy = ball.y - player.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-
-    // Top oyuncuya yakınsa topu sür
-    if (dist < ball.radius + player.radius + 5) {
-      const speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
-      if (speed > 0.1) {
-        // Top, oyuncu hızının %80'i kadar sürülüyor
-        ball.vx = player.vx * 0.8;
-        ball.vy = player.vy * 0.8;
-        // Top, oyuncunun biraz önünde kalıyor
-        ball.x = player.x + (dx / dist) * (player.radius + ball.radius + 1);
-        ball.y = player.y + (dy / dist) * (player.radius + ball.radius + 1);
-      }
-    }
-  });
-
-  const playersData = rooms[roomId].map(p => ({
-    id: p.id,
-    x: p.x,
-    y: p.y,
-    radius: p.radius,
-    nickname: p.nickname,
-    team: p.team,
-  }));
-
-  broadcast(roomId, {
-    type: 'gameState',
-    players: playersData,
-    ball: balls[roomId],
-    scores: scores[roomId],
-  });
+  // Sadece durdur, sekme yok, duvar sınırları
+  if (ball.x < ball.radius) {
+    ball.x = ball.radius;
+    ball.vx = 0;
+  }
+  if (ball.x > FIELD_WIDTH - ball.radius) {
+    ball.x = FIELD_WIDTH - ball.radius;
+    ball.vx = 0;
+  }
 }
 
 server.on('connection', ws => {
   let currentRoom = null;
-  const id = Math.random().toString(36).substr(2, 9);
-  const player = { id, x: 100, y: FIELD_HEIGHT / 2, radius: 15, team: 1, ws, nickname: '', vx: 0, vy: 0, isHost: false };
+  let player = { x: 100, y: 100, nickname: '', ws, radius: 15, team: 1, id: null };
 
   ws.on('message', msg => {
     try {
       const data = JSON.parse(msg);
 
       if (data.type === 'join') {
-        const { roomId: rid, nickname, isHost } = data;
-        if (!rid.match(/^[a-z0-9]{6}$/i)) {
-          ws.send(JSON.stringify({ type: 'error', message: 'Geçersiz Parti ID' }));
-          ws.close();
-          return;
-        }
+        const { roomId: rid, nickname } = data;
         currentRoom = rid;
+
+        if (!rooms[currentRoom]) rooms[currentRoom] = [];
+        if (!scores[currentRoom]) scores[currentRoom] = { team1: 0, team2: 0 };
+        if (!balls[currentRoom]) balls[currentRoom] = resetBall();
+
+        player.id = (Math.random() + 1).toString(36).substring(2, 9);
         player.nickname = nickname;
-
-        if (!rooms[currentRoom]) {
-          rooms[currentRoom] = [];
-          scores[currentRoom] = { team1: 0, team2: 0 };
-          resetBall(currentRoom);
-          intervals[currentRoom] = setInterval(() => gameLoop(currentRoom), 1000 / FPS);
-        }
-
         player.team = rooms[currentRoom].length % 2 === 0 ? 1 : 2;
+
         player.x = player.team === 1 ? 100 : FIELD_WIDTH - 100;
         player.y = FIELD_HEIGHT / 2;
-        player.isHost = isHost && rooms[currentRoom].length === 0;
 
         rooms[currentRoom].push(player);
 
-        ws.send(JSON.stringify({ type: 'init', id }));
-
+        // Yeni oyuncuya id gönder
+        ws.send(JSON.stringify({ type: 'init', id: player.id }));
         return;
       }
 
       if (data.type === 'move') {
-        if (typeof data.dx === 'number' && typeof data.dy === 'number') {
-          player.vx = data.dx * PLAYER_SPEED;
-          player.vy = data.dy * PLAYER_SPEED;
-        } else {
-          player.vx = 0;
-          player.vy = 0;
+        const speed = MAX_PLAYER_SPEED;
+        if (data.dx && data.dy) {
+          player.x += data.dx * speed;
+          player.y += data.dy * speed;
+
+          player.x = Math.max(player.radius, Math.min(FIELD_WIDTH - player.radius, player.x));
+          player.y = Math.max(player.radius, Math.min(FIELD_HEIGHT - player.radius, player.y));
+
+          // Eğer top oyuncuya yakınsa topu sürebilsin (topu sürme mekaniği)
+          let ball = balls[currentRoom];
+          const dx = ball.x - player.x;
+          const dy = ball.y - player.y;
+          const dist = Math.sqrt(dx*dx + dy*dy);
+
+          if (dist < player.radius + ball.radius + 5) {
+            // Topun hızı oyuncunun hareketine göre az az değişir (sürme efekti)
+            ball.vx = data.dx * speed * 0.6;
+            ball.vy = data.dy * speed * 0.6;
+
+            // Top pozisyonunu oyuncunun biraz önüne çekelim
+            ball.x = player.x + data.dx * (player.radius + ball.radius + 2);
+            ball.y = player.y + data.dy * (player.radius + ball.radius + 2);
+          }
         }
       }
 
       if (data.type === 'kick') {
-        const ball = balls[currentRoom];
+        // Şut çekme, topa sert vurma
+        let ball = balls[currentRoom];
         const dx = ball.x - player.x;
         const dy = ball.y - player.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
+        const dist = Math.sqrt(dx*dx + dy*dy);
 
-        if (dist < ball.radius + player.radius + 10) {
-          // Yönü topa doğru ayarla ve kuvvetli bir şut ver
-          const dirX = dx / dist;
-          const dirY = dy / dist;
-          ball.vx = dirX * KICK_POWER;
-          ball.vy = dirY * KICK_POWER;
+        if (dist < player.radius + ball.radius + 5) {
+          // Vuruş yönü normalize edilir
+          ball.vx = (dx / dist) * KICK_POWER;
+          ball.vy = (dy / dist) * KICK_POWER;
         }
       }
 
-      if (player.isHost) {
-        if (data.type === 'changeTeam') {
-          const target = rooms[currentRoom].find(p => p.id === data.target);
-          if (target) target.team = target.team === 1 ? 2 : 1;
-          return;
-        }
-        if (data.type === 'kickPlayer') {
-          const idx = rooms[currentRoom].findIndex(p => p.id === data.target);
-          if (idx !== -1) {
-            rooms[currentRoom][idx].ws.close();
-            rooms[currentRoom].splice(idx, 1);
-          }
-          return;
-        }
-      }
+      // Burada diğer mesaj tiplerini işleyebilirsin (takım değiştirme vs)
+
     } catch (e) {
-      console.error('Hatalı mesaj:', e);
+      console.log('Hatalı mesaj:', e);
     }
   });
 
+  const interval = setInterval(() => {
+    if (!currentRoom) return;
+
+    updateBall(currentRoom);
+
+    const playersData = rooms[currentRoom].map(p => ({
+      id: p.id,
+      x: p.x,
+      y: p.y,
+      nickname: p.nickname,
+      radius: p.radius,
+      team: p.team,
+    }));
+
+    broadcast(currentRoom, {
+      type: 'gameState',
+      players: playersData,
+      ball: balls[currentRoom],
+      scores: scores[currentRoom]
+    });
+  }, 1000 / 60);
+
   ws.on('close', () => {
     if (!currentRoom) return;
+
     rooms[currentRoom] = rooms[currentRoom].filter(p => p.ws !== ws);
+
     if (rooms[currentRoom].length === 0) {
-      clearInterval(intervals[currentRoom]);
-      delete intervals[currentRoom];
       delete rooms[currentRoom];
       delete scores[currentRoom];
       delete balls[currentRoom];
     }
+
+    clearInterval(interval);
   });
 });
 
