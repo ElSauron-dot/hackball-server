@@ -1,68 +1,116 @@
-const WebSocket = require('ws');
-const wss = new WebSocket.Server({ port: 3000 });
-const { v4: uuid } = require('uuid');
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+const PORT = process.env.PORT || 3000;
 
-let parties = {};
+app.use(express.static('.'));
 
-wss.on('connection', ws => {
-  let pid = null, id = uuid();
+let games = {};
 
-  ws.on('message', msg => {
-    let data = JSON.parse(msg);
+function randomId() {
+  return Math.random().toString(36).substr(2, 6).toUpperCase();
+}
 
-    if (data.type === 'createParty') {
-      pid = Math.random().toString(36).substr(2, 5).toUpperCase();
-      parties[pid] = { leader: id, players: {} };
-      parties[pid].players[id] = { nick: data.nick, x: 100, y: 270, team: 'red' };
-      ws.send(JSON.stringify({ type: 'init', id, partyId: pid, leader: true }));
-    }
+function createPlayer(name, leader = false, team = 'red') {
+  return {
+    name,
+    x: Math.random() * 800 + 80,
+    y: Math.random() * 400 + 70,
+    color: team === 'red' ? 'crimson' : 'dodgerblue',
+    team,
+    vx: 0, vy: 0,
+    leader
+  };
+}
 
-    else if (data.type === 'joinParty' && parties[data.partyId]) {
-      pid = data.partyId;
-      parties[pid].players[id] = { nick: data.nick, x: 860, y: 270, team: 'blue' };
-      ws.send(JSON.stringify({ type: 'init', id, partyId: pid, leader: false }));
-    }
+io.on('connection', socket => {
+  let gameId, player;
 
-    else if (data.type === 'input') {
-      const p = parties[pid]?.players[id];
-      if (!p) return;
-      const speed = 5;
-      if (data.keys.w || data.keys.arrowup) p.y -= speed;
-      if (data.keys.s || data.keys.arrowdown) p.y += speed;
-      if (data.keys.a || data.keys.arrowleft) p.x -= speed;
-      if (data.keys.d || data.keys.arrowright) p.x += speed;
-    }
+  socket.on('create', name => {
+    gameId = randomId();
+    player = createPlayer(name, true, 'red');
+    games[gameId] = {
+      players: { [socket.id]: player },
+      ball: { x: 480, y: 270, vx: 0, vy: 0 }
+    };
+    socket.join(gameId);
+    socket.emit('init', { id: socket.id, teamLeader: true });
+  });
 
-    else if (data.type === 'changeTeam') {
-      if (id === parties[pid]?.leader) {
-        parties[pid].players[data.id].team = data.team;
-      }
-    }
+  socket.on('join', ({ nick, id }) => {
+    const game = games[id];
+    if (!game) return;
+    gameId = id;
+    player = createPlayer(nick, false, 'blue');
+    game.players[socket.id] = player;
+    socket.join(gameId);
+    socket.emit('init', { id: socket.id, teamLeader: false });
+  });
 
-    else if (data.type === 'kickPlayer') {
-      if (id === parties[pid]?.leader) {
-        delete parties[pid].players[data.id];
-      }
-    }
+  socket.on('input', keys => {
+    if (!player) return;
+    player.vx = player.vy = 0;
+    if (keys['KeyW'] || keys['ArrowUp']) player.vy = -2;
+    if (keys['KeyS'] || keys['ArrowDown']) player.vy = 2;
+    if (keys['KeyA'] || keys['ArrowLeft']) player.vx = -2;
+    if (keys['KeyD'] || keys['ArrowRight']) player.vx = 2;
 
-    else if (data.type === 'transferLeader') {
-      if (id === parties[pid]?.leader) {
-        parties[pid].leader = data.id;
-      }
+    // Topla temas (şut)
+    const game = games[gameId];
+    if (!game) return;
+    const ball = game.ball;
+    const dx = ball.x - player.x;
+    const dy = ball.y - player.y;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    if ((keys['Space'] || keys['Numpad0']) && dist < 25) {
+      ball.vx += dx / dist * 3;
+      ball.vy += dy / dist * 3;
     }
   });
 
-  const interval = setInterval(() => {
-    if (!pid || !parties[pid]) return;
-    const state = {
-      type: 'state',
-      players: parties[pid].players,
-      ball: { x: 480, y: 270 } // henüz sabit
-    };
-    wss.clients.forEach(c => c.send(JSON.stringify(state)));
-  }, 1000 / 50);
+  socket.on('changeTeam', ({ id, team }) => {
+    const g = games[gameId];
+    if (g?.players[id]) {
+      g.players[id].team = team;
+      g.players[id].color = team === 'red' ? 'crimson' : 'dodgerblue';
+    }
+  });
 
-  ws.on('close', () => {
-    if (parties[pid]) delete parties[pid].players[id];
+  socket.on('kick', id => {
+    const g = games[gameId];
+    if (g?.players[id]) {
+      io.to(id).disconnectSockets();
+      delete g.players[id];
+    }
+  });
+
+  socket.on('disconnect', () => {
+    const g = games[gameId];
+    if (g?.players[socket.id]) delete g.players[socket.id];
   });
 });
+
+setInterval(() => {
+  for (const id in games) {
+    const g = games[id];
+    // Top fiziği
+    g.ball.x += g.ball.vx;
+    g.ball.y += g.ball.vy;
+    g.ball.vx *= 0.98;
+    g.ball.vy *= 0.98;
+
+    // Sınır çarpması
+    if (g.ball.x < 10 || g.ball.x > 950) g.ball.vx *= -1;
+    if (g.ball.y < 10 || g.ball.y > 530) g.ball.vy *= -1;
+
+    io.to(id).emit('state', {
+      players: g.players,
+      ball: g.ball
+    });
+  }
+}, 20);
+
+server.listen(PORT, () => console.log('Server running on port', PORT));
