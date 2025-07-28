@@ -1,110 +1,138 @@
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
-const cors = require("cors");
 const { v4: uuidv4 } = require("uuid");
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "*",
-  },
+    origin: "*"
+  }
 });
 
-app.use(cors());
-
-const parties = {}; // { partyId: { leaderId, players: [ {id, nick, color}], ... } }
+const parties = {};
+const TICK_RATE = 50;
+const PLAYER_SPEED = 3;
+const BALL_SPEED = 5;
+const BALL_RADIUS = 10;
+const FIELD_WIDTH = 1000;
+const FIELD_HEIGHT = 600;
 
 io.on("connection", (socket) => {
-  console.log(`Kullanıcı bağlandı: ${socket.id}`);
+  let currentParty = null;
 
-  socket.on("createParty", ({ nick }) => {
-    const partyId = uuidv4().slice(0, 6);
-    parties[partyId] = {
-      leaderId: socket.id,
-      players: [],
+  socket.on("createParty", (name) => {
+    const partyID = uuidv4().slice(0, 5).toUpperCase();
+    parties[partyID] = {
+      leader: socket.id,
+      players: {},
+      ball: { x: FIELD_WIDTH / 2, y: FIELD_HEIGHT / 2, vx: 0, vy: 0 }
     };
 
-    const player = {
+    currentParty = partyID;
+    parties[partyID].players[socket.id] = {
       id: socket.id,
-      nick,
-      color: "red",
+      name,
+      x: 100,
+      y: 100,
+      team: "red",
+      input: {}
     };
 
-    parties[partyId].players.push(player);
-    socket.join(partyId);
-    io.to(socket.id).emit("partyCreated", partyId);
-    io.to(partyId).emit("updatePlayerList", parties[partyId].players);
+    socket.join(partyID);
+    io.to(socket.id).emit("init", {
+      id: socket.id,
+      allPlayers: parties[partyID].players,
+      ballState: parties[partyID].ball,
+      leader: socket.id,
+      pid: partyID
+    });
   });
 
-  socket.on("joinParty", ({ nick, partyId }) => {
-    const party = parties[partyId];
-    if (!party) return;
+  socket.on("joinParty", ({ name, id }) => {
+    if (!parties[id]) return;
+    currentParty = id;
 
-    const color = party.players.filter(p => p.color === "red").length <= party.players.filter(p => p.color === "blue").length ? "red" : "blue";
-    const player = {
+    const team = Object.values(parties[id].players).filter(p => p.team === "red").length <=
+                 Object.values(parties[id].players).filter(p => p.team === "blue").length ? "red" : "blue";
+
+    parties[id].players[socket.id] = {
       id: socket.id,
-      nick,
-      color,
+      name,
+      x: 200,
+      y: 200,
+      team,
+      input: {}
     };
 
-    party.players.push(player);
-    socket.join(partyId);
-    io.to(socket.id).emit("joinedParty", { partyId });
-    io.to(partyId).emit("updatePlayerList", party.players);
+    socket.join(id);
+    io.to(socket.id).emit("init", {
+      id: socket.id,
+      allPlayers: parties[id].players,
+      ballState: parties[id].ball,
+      leader: parties[id].leader,
+      pid: id
+    });
   });
 
-  socket.on("changeTeam", ({ id, partyId }) => {
-    const party = parties[partyId];
-    if (!party || socket.id !== party.leaderId) return;
-
-    const player = party.players.find(p => p.id === id);
-    if (player) {
-      player.color = player.color === "red" ? "blue" : "red";
-      io.to(partyId).emit("updatePlayerList", party.players);
+  socket.on("input", (input) => {
+    if (currentParty && parties[currentParty]?.players[socket.id]) {
+      parties[currentParty].players[socket.id].input = input;
     }
   });
 
-  socket.on("kickPlayer", ({ id, partyId }) => {
-    const party = parties[partyId];
-    if (!party || socket.id !== party.leaderId) return;
-
-    party.players = party.players.filter(p => p.id !== id);
-    io.to(id).emit("kicked");
-    io.to(partyId).emit("updatePlayerList", party.players);
-  });
-
-  socket.on("makeLeader", ({ id, partyId }) => {
-    const party = parties[partyId];
-    if (!party || socket.id !== party.leaderId) return;
-
-    party.leaderId = id;
-    io.to(partyId).emit("updatePlayerList", party.players);
-  });
-
   socket.on("disconnect", () => {
-    console.log(`Kullanıcı ayrıldı: ${socket.id}`);
-    for (const [partyId, party] of Object.entries(parties)) {
-      const index = party.players.findIndex(p => p.id === socket.id);
-      if (index !== -1) {
-        party.players.splice(index, 1);
-
-        if (party.leaderId === socket.id && party.players.length > 0) {
-          party.leaderId = party.players[0].id; // Yeni lider belirle
-        }
-
-        if (party.players.length === 0) {
-          delete parties[partyId];
-        } else {
-          io.to(partyId).emit("updatePlayerList", party.players);
-        }
+    if (currentParty && parties[currentParty]) {
+      delete parties[currentParty].players[socket.id];
+      if (Object.keys(parties[currentParty].players).length === 0) {
+        delete parties[currentParty];
       }
     }
   });
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Sunucu ${PORT} portunda çalışıyor.`);
+setInterval(() => {
+  for (const partyID in parties) {
+    const party = parties[partyID];
+
+    for (const id in party.players) {
+      const p = party.players[id];
+      const input = p.input || {};
+
+      if (input.left) p.x -= PLAYER_SPEED;
+      if (input.right) p.x += PLAYER_SPEED;
+      if (input.up) p.y -= PLAYER_SPEED;
+      if (input.down) p.y += PLAYER_SPEED;
+
+      // Basit topa vurma
+      const dx = p.x - party.ball.x;
+      const dy = p.y - party.ball.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (input.kick && dist < 25) {
+        const angle = Math.atan2(dy, dx);
+        party.ball.vx = -Math.cos(angle) * BALL_SPEED;
+        party.ball.vy = -Math.sin(angle) * BALL_SPEED;
+      }
+    }
+
+    // Top hareketi
+    party.ball.x += party.ball.vx;
+    party.ball.y += party.ball.vy;
+    party.ball.vx *= 0.99;
+    party.ball.vy *= 0.99;
+
+    // Duvar çarpması
+    if (party.ball.x < BALL_RADIUS || party.ball.x > FIELD_WIDTH - BALL_RADIUS) party.ball.vx *= -1;
+    if (party.ball.y < BALL_RADIUS || party.ball.y > FIELD_HEIGHT - BALL_RADIUS) party.ball.vy *= -1;
+
+    io.to(partyID).emit("state", {
+      allPlayers: party.players,
+      ballState: party.ball
+    });
+  }
+}, 1000 / TICK_RATE);
+
+server.listen(process.env.PORT || 3000, () => {
+  console.log("HackBall sunucusu çalışıyor!");
 });
