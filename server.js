@@ -12,12 +12,16 @@ const io = new Server(server, {
 });
 
 const parties = {};
-const TICK_RATE = 50;
-const PLAYER_SPEED = 3;
-const BALL_SPEED = 5;
-const BALL_RADIUS = 10;
+const TICK_RATE = 60;
 const FIELD_WIDTH = 1000;
 const FIELD_HEIGHT = 600;
+
+const PLAYER_RADIUS = 15;
+const BALL_RADIUS = 10;
+const PLAYER_ACCEL = 0.5;
+const PLAYER_FRICTION = 0.90;
+const BALL_FRICTION = 0.995;
+const KICK_FORCE = 6;
 
 io.on("connection", (socket) => {
   let currentParty = null;
@@ -27,19 +31,24 @@ io.on("connection", (socket) => {
     parties[partyID] = {
       leader: socket.id,
       players: {},
-      ball: { x: FIELD_WIDTH / 2, y: FIELD_HEIGHT / 2, vx: 0, vy: 0 }
+      ball: {
+        x: FIELD_WIDTH / 2,
+        y: FIELD_HEIGHT / 2,
+        vx: 0,
+        vy: 0
+      }
     };
-
     currentParty = partyID;
     parties[partyID].players[socket.id] = {
       id: socket.id,
       name,
-      x: 100,
-      y: 100,
+      x: Math.random() * FIELD_WIDTH,
+      y: Math.random() * FIELD_HEIGHT,
+      vx: 0,
+      vy: 0,
       team: "red",
       input: {}
     };
-
     socket.join(partyID);
     io.to(socket.id).emit("init", {
       id: socket.id,
@@ -53,15 +62,17 @@ io.on("connection", (socket) => {
   socket.on("joinParty", ({ name, id }) => {
     if (!parties[id]) return;
     currentParty = id;
-
-    const team = Object.values(parties[id].players).filter(p => p.team === "red").length <=
-                 Object.values(parties[id].players).filter(p => p.team === "blue").length ? "red" : "blue";
+    const team =
+      Object.values(parties[id].players).filter(p => p.team === "red").length <=
+      Object.values(parties[id].players).filter(p => p.team === "blue").length ? "red" : "blue";
 
     parties[id].players[socket.id] = {
       id: socket.id,
       name,
-      x: 200,
-      y: 200,
+      x: Math.random() * FIELD_WIDTH,
+      y: Math.random() * FIELD_HEIGHT,
+      vx: 0,
+      vy: 0,
       team,
       input: {}
     };
@@ -96,35 +107,56 @@ setInterval(() => {
   for (const partyID in parties) {
     const party = parties[partyID];
 
+    // Player movement update
     for (const id in party.players) {
       const p = party.players[id];
       const input = p.input || {};
 
-      if (input.left) p.x -= PLAYER_SPEED;
-      if (input.right) p.x += PLAYER_SPEED;
-      if (input.up) p.y -= PLAYER_SPEED;
-      if (input.down) p.y += PLAYER_SPEED;
+      if (input.left) p.vx -= PLAYER_ACCEL;
+      if (input.right) p.vx += PLAYER_ACCEL;
+      if (input.up) p.vy -= PLAYER_ACCEL;
+      if (input.down) p.vy += PLAYER_ACCEL;
 
-      // Basit topa vurma
-      const dx = p.x - party.ball.x;
-      const dy = p.y - party.ball.y;
+      p.x += p.vx;
+      p.y += p.vy;
+
+      // Friction
+      p.vx *= PLAYER_FRICTION;
+      p.vy *= PLAYER_FRICTION;
+
+      // Wall collision
+      if (p.x < PLAYER_RADIUS) { p.x = PLAYER_RADIUS; p.vx *= -0.5; }
+      if (p.x > FIELD_WIDTH - PLAYER_RADIUS) { p.x = FIELD_WIDTH - PLAYER_RADIUS; p.vx *= -0.5; }
+      if (p.y < PLAYER_RADIUS) { p.y = PLAYER_RADIUS; p.vy *= -0.5; }
+      if (p.y > FIELD_HEIGHT - PLAYER_RADIUS) { p.y = FIELD_HEIGHT - PLAYER_RADIUS; p.vy *= -0.5; }
+
+      // Ball kick
+      const dx = party.ball.x - p.x;
+      const dy = party.ball.y - p.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      if (input.kick && dist < 25) {
+
+      if (input.kick && dist < PLAYER_RADIUS + BALL_RADIUS) {
         const angle = Math.atan2(dy, dx);
-        party.ball.vx = -Math.cos(angle) * BALL_SPEED;
-        party.ball.vy = -Math.sin(angle) * BALL_SPEED;
+        party.ball.vx += Math.cos(angle) * KICK_FORCE;
+        party.ball.vy += Math.sin(angle) * KICK_FORCE;
       }
     }
 
-    // Top hareketi
+    // Ball movement
     party.ball.x += party.ball.vx;
     party.ball.y += party.ball.vy;
-    party.ball.vx *= 0.99;
-    party.ball.vy *= 0.99;
+    party.ball.vx *= BALL_FRICTION;
+    party.ball.vy *= BALL_FRICTION;
 
-    // Duvar çarpması
-    if (party.ball.x < BALL_RADIUS || party.ball.x > FIELD_WIDTH - BALL_RADIUS) party.ball.vx *= -1;
-    if (party.ball.y < BALL_RADIUS || party.ball.y > FIELD_HEIGHT - BALL_RADIUS) party.ball.vy *= -1;
+    // Ball wall bounce
+    if (party.ball.x < BALL_RADIUS || party.ball.x > FIELD_WIDTH - BALL_RADIUS) {
+      party.ball.vx *= -1;
+      party.ball.x = Math.max(BALL_RADIUS, Math.min(FIELD_WIDTH - BALL_RADIUS, party.ball.x));
+    }
+    if (party.ball.y < BALL_RADIUS || party.ball.y > FIELD_HEIGHT - BALL_RADIUS) {
+      party.ball.vy *= -1;
+      party.ball.y = Math.max(BALL_RADIUS, Math.min(FIELD_HEIGHT - BALL_RADIUS, party.ball.y));
+    }
 
     io.to(partyID).emit("state", {
       allPlayers: party.players,
