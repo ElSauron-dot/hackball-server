@@ -1,132 +1,177 @@
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
+
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server);
 
 const WIDTH = 900;
 const HEIGHT = 520;
-const FIELD_WIDTH = WIDTH;
-const FIELD_HEIGHT = HEIGHT;
-const GOAL_WIDTH = 150;
-const GOAL_HEIGHT = 120;
-
+const GOAL_HEIGHT = 140;
 const PLAYER_RADIUS = 15;
 const BALL_RADIUS = 10;
 const PLAYER_ACCEL = 0.6;
-const PLAYER_FRICTION = 0.85;
-const BALL_FRICTION = 0.995;
+const PLAYER_FRICTION = 0.86;
+const BALL_FRICTION = 0.992;
 const KICK_FORCE = 7;
 
 let parties = {};
 
 io.on("connection", (socket) => {
+  // Parti oluştur
   socket.on("createParty", ({ nick }) => {
-    const partyID = Math.random().toString(36).substr(2, 6).toUpperCase();
+    if (!nick) return;
+    const partyID = Math.random().toString(36).substr(2, 5).toUpperCase();
     parties[partyID] = {
       players: {},
-      ball: { x: FIELD_WIDTH / 2, y: FIELD_HEIGHT / 2, vx: 0, vy: 0 },
-      score: { red: 0, blue: 0 }
+      ball: { x: WIDTH / 2, y: HEIGHT / 2, vx: 0, vy: 0 },
+      score: { red: 0, blue: 0 },
     };
-    socket.join(partyID);
+
     parties[partyID].players[socket.id] = {
-      id: socket.id, nick, team: "red", x: 100, y: FIELD_HEIGHT / 2, vx: 0, vy: 0, input: {}
+      id: socket.id,
+      nick,
+      team: "red",
+      x: 100,
+      y: HEIGHT / 2,
+      vx: 0,
+      vy: 0,
+      input: {},
     };
+
+    socket.join(partyID);
     socket.emit("start", { partyID });
-    io.to(partyID).emit("state", parties[partyID]);
   });
 
+  // Parti katıl
   socket.on("joinParty", ({ nick, partyID }) => {
     const party = parties[partyID];
     if (!party) {
-      socket.emit("joinError", "Böyle bir parti yok.");
+      socket.emit("joinError", "Böyle bir parti yok!");
       return;
     }
-    socket.join(partyID);
-    const team = Object.values(party.players).filter(p => p.team === "red").length <=
-                 Object.values(party.players).filter(p => p.team === "blue").length ? "red" : "blue";
+
+    const team =
+      Object.values(party.players).filter((p) => p.team === "red").length <=
+      Object.values(party.players).filter((p) => p.team === "blue").length
+        ? "red"
+        : "blue";
+
     party.players[socket.id] = {
-      id: socket.id, nick, team,
-      x: FIELD_WIDTH - 100, y: FIELD_HEIGHT / 2, vx: 0, vy: 0, input: {}
+      id: socket.id,
+      nick,
+      team,
+      x: team === "red" ? 100 : WIDTH - 100,
+      y: HEIGHT / 2,
+      vx: 0,
+      vy: 0,
+      input: {},
     };
+
+    socket.join(partyID);
     socket.emit("start", { partyID });
-    io.to(partyID).emit("state", party);
   });
 
+  // Input yakala
   socket.on("input", (input) => {
-    const partyID = Object.keys(socket.rooms).find(r => r !== socket.id);
-    const party = parties[partyID];
-    if (party && party.players[socket.id]) {
-      party.players[socket.id].input = input;
-    }
+    const partyID = findParty(socket.id);
+    if (!partyID) return;
+    parties[partyID].players[socket.id].input = input;
   });
 
+  // Oyuncu ayrıldığında
   socket.on("disconnect", () => {
-    const partyID = Object.keys(socket.rooms).find(r => r !== socket.id);
-    const party = parties[partyID];
-    if (party && party.players[socket.id]) {
-      delete party.players[socket.id];
-      if (Object.keys(party.players).length === 0) {
-        delete parties[partyID];
-      }
+    const partyID = findParty(socket.id);
+    if (!partyID) return;
+    delete parties[partyID].players[socket.id];
+    if (Object.keys(parties[partyID].players).length === 0) {
+      delete parties[partyID];
     }
   });
+});
 
-  setInterval(() => {
-    for (const pid in parties) {
-      const party = parties[pid];
-      // update players
-      for (const id in party.players) {
-        const p = party.players[id];
-        const inp = p.input || {};
-        if (inp.left) p.vx -= PLAYER_ACCEL;
-        if (inp.right) p.vx += PLAYER_ACCEL;
-        if (inp.up) p.vy -= PLAYER_ACCEL;
-        if (inp.down) p.vy += PLAYER_ACCEL;
+// Parti bul
+function findParty(id) {
+  return Object.keys(parties).find((pid) => parties[pid].players[id]);
+}
 
-        p.x += p.vx; p.y += p.vy;
-        p.vx *= PLAYER_FRICTION;
-        p.vy *= PLAYER_FRICTION;
+// Oyun döngüsü
+setInterval(() => {
+  for (const pid in parties) {
+    const party = parties[pid];
+    const ball = party.ball;
 
-        if (p.x < PLAYER_RADIUS) p.x = PLAYER_RADIUS;
-        if (p.x > FIELD_WIDTH - PLAYER_RADIUS) p.x = FIELD_WIDTH - PLAYER_RADIUS;
-        if (p.y < PLAYER_RADIUS) p.y = PLAYER_RADIUS;
-        if (p.y > FIELD_HEIGHT - PLAYER_RADIUS) p.y = FIELD_HEIGHT - PLAYER_RADIUS;
+    // Oyuncu hareketleri
+    for (const id in party.players) {
+      const p = party.players[id];
+      const i = p.input || {};
 
-        const dx = party.ball.x - p.x;
-        const dy = party.ball.y - p.y;
-        const dist = Math.sqrt(dx*dx + dy*dy);
-        if (inp.kick && dist < PLAYER_RADIUS + BALL_RADIUS) {
-          const ang = Math.atan2(dy, dx);
-          party.ball.vx += Math.cos(ang) * KICK_FORCE;
-          party.ball.vy += Math.sin(ang) * KICK_FORCE;
-        }
+      if (i.left) p.vx -= PLAYER_ACCEL;
+      if (i.right) p.vx += PLAYER_ACCEL;
+      if (i.up) p.vy -= PLAYER_ACCEL;
+      if (i.down) p.vy += PLAYER_ACCEL;
+
+      p.x += p.vx;
+      p.y += p.vy;
+
+      p.vx *= PLAYER_FRICTION;
+      p.vy *= PLAYER_FRICTION;
+
+      // Duvar çarpması
+      if (p.x < PLAYER_RADIUS) p.x = PLAYER_RADIUS;
+      if (p.x > WIDTH - PLAYER_RADIUS) p.x = WIDTH - PLAYER_RADIUS;
+      if (p.y < PLAYER_RADIUS) p.y = PLAYER_RADIUS;
+      if (p.y > HEIGHT - PLAYER_RADIUS) p.y = HEIGHT - PLAYER_RADIUS;
+
+      // Topa vurma
+      const dx = ball.x - p.x;
+      const dy = ball.y - p.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      if (i.kick && dist < PLAYER_RADIUS + BALL_RADIUS) {
+        const angle = Math.atan2(dy, dx);
+        ball.vx += Math.cos(angle) * KICK_FORCE;
+        ball.vy += Math.sin(angle) * KICK_FORCE;
       }
-      // update ball
-      const b = party.ball;
-      b.x += b.vx; b.y += b.vy;
-      b.vx *= BALL_FRICTION; b.vy *= BALL_FRICTION;
-      if (b.x < BALL_RADIUS || b.x > FIELD_WIDTH - BALL_RADIUS) b.vx *= -1;
-      if (b.y < BALL_RADIUS || b.y > FIELD_HEIGHT - BALL_RADIUS) b.vy *= -1;
-
-      // goal detection
-      const goalTop = (FIELD_HEIGHT - GOAL_HEIGHT) / 2;
-      const goalBottom = goalTop + GOAL_HEIGHT;
-      if (b.x < BALL_RADIUS && b.y > goalTop && b.y < goalBottom) {
-        party.score.blue++;
-        b.x = FIELD_WIDTH/2; b.y = FIELD_HEIGHT/2; b.vx = b.vy = 0;
-      }
-      if (b.x > FIELD_WIDTH - BALL_RADIUS && b.y > goalTop && b.y < goalBottom) {
-        party.score.red++;
-        b.x = FIELD_WIDTH/2; b.y = FIELD_HEIGHT/2; b.vx = b.vy = 0;
-      }
-
-      io.to(pid).emit("state", party);
     }
-  }, 1000/60);
-});
 
-server.listen(process.env.PORT || 3000, () => {
-  console.log("HackBall sunucusu çalışıyor.");
-});
+    // Top hareketi
+    ball.x += ball.vx;
+    ball.y += ball.vy;
+    ball.vx *= BALL_FRICTION;
+    ball.vy *= BALL_FRICTION;
+
+    // Duvar çarpması
+    if (ball.y < BALL_RADIUS || ball.y > HEIGHT - BALL_RADIUS) {
+      ball.vy *= -1;
+    }
+
+    // Gol tespiti
+    const goalTop = (HEIGHT - GOAL_HEIGHT) / 2;
+    const goalBottom = goalTop + GOAL_HEIGHT;
+
+    if (ball.x < BALL_RADIUS && ball.y > goalTop && ball.y < goalBottom) {
+      party.score.blue++;
+      resetBall(ball);
+    }
+    if (ball.x > WIDTH - BALL_RADIUS && ball.y > goalTop && ball.y < goalBottom) {
+      party.score.red++;
+      resetBall(ball);
+    }
+
+    // State gönder
+    io.to(pid).emit("state", { players: party.players, ball, score: party.score });
+  }
+}, 1000 / 60);
+
+function resetBall(ball) {
+  ball.x = WIDTH / 2;
+  ball.y = HEIGHT / 2;
+  ball.vx = 0;
+  ball.vy = 0;
+}
+
+server.listen(process.env.PORT || 3000, () =>
+  console.log("HackBall çalışıyor")
+);
