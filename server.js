@@ -1,104 +1,158 @@
-const http=require('http');
-const WebSocket=require('ws');
-const server=http.createServer();
-const wss=new WebSocket.Server({server});
+const express = require("express");
+const app = express();
+const http = require("http").Server(app);
+const cors = require("cors");
+const { Server } = require("socket.io");
 
-const rooms={};
+app.use(cors());
+app.use(express.static("public"));
 
-function createPlayer(nickname,team){
-  const x=team==='red'?100:500;
-  const y=Math.random()*300+50;
-  return { nickname, team, x, y, pressing:{}, speed:2.5 };
-}
-function createBall(){ return { x:300,y:200,dx:0,dy:0,radius:10,friction:0.98 }; }
+const io = new Server(http, {
+  cors: {
+    origin: "*"
+  }
+});
 
-wss.on('connection', ws=>{
-  let roomId='', playerId='';
-  ws.on('message',msg=>{
-    const d=JSON.parse(msg);
-    if(d.type==='join'){
-      roomId=d.roomId;
-      if(!rooms[roomId]){ rooms[roomId]={ players:new Map(), ball:createBall(), score:{red:0,blue:0}, interval:null }; startLoop(roomId); }
-      if(!['red','blue'].includes(d.team)){ return ws.send(JSON.stringify({type:'error',message:'Geçersiz takım'})); }
-      if(Array.from(rooms[roomId].players.values()).some(p=>p.team===d.team)){
-        return ws.send(JSON.stringify({type:'error',message:'Takım dolu'})); }
-      playerId=Math.random().toString(36).substr(2,6);
-      rooms[roomId].players.set(playerId, { ws, playerId, ...createPlayer(d.nickname,d.team) });
+const PORT = process.env.PORT || 3000;
+
+let rooms = {};
+let ball = {
+  x: 400,
+  y: 300,
+  vx: 0,
+  vy: 0,
+  radius: 10
+};
+
+io.on("connection", (socket) => {
+  console.log("Bir oyuncu bağlandı:", socket.id);
+
+  socket.on("createRoom", ({ nickname, team }) => {
+    const roomId = Math.random().toString(36).substr(2, 6);
+    rooms[roomId] = {
+      host: socket.id,
+      players: {},
+      timer: 360,
+      score: { red: 0, blue: 0 },
+      started: false
+    };
+    socket.join(roomId);
+    rooms[roomId].players[socket.id] = {
+      playerId: socket.id,
+      nickname,
+      team,
+      x: team === "red" ? 200 : 600,
+      y: 300,
+      vx: 0,
+      vy: 0
+    };
+    socket.emit("roomCreated", roomId);
+  });
+
+  socket.on("joinRoom", ({ roomId, nickname, team }) => {
+    const room = rooms[roomId];
+    if (!room) {
+      socket.emit("errorMsg", "Geçersiz Parti ID");
+      return;
     }
-    else if(d.type==='move'){
-      const p=rooms[roomId]?.players.get(playerId);
-      if(p){ p.pressing[d.dir]=true; setTimeout(()=>p.pressing[d.dir]=false,100); }
+    socket.join(roomId);
+    room.players[socket.id] = {
+      playerId: socket.id,
+      nickname,
+      team,
+      x: team === "red" ? 200 : 600,
+      y: 300,
+      vx: 0,
+      vy: 0
+    };
+    socket.emit("roomJoined", roomId);
+  });
+
+  socket.on("startGame", (roomId) => {
+    if (rooms[roomId]) {
+      rooms[roomId].started = true;
+      rooms[roomId].timer = 360;
     }
-    else if(d.type==='chat'){
-      const room=rooms[roomId];
-      if(room){
-        room.players.forEach(pt=>pt.ws.send(JSON.stringify({type:'chat',nickname:rooms[roomId].players.get(playerId).nickname,msg:d.msg})));
+  });
+
+  socket.on("input", ({ roomId, input }) => {
+    const player = rooms[roomId]?.players[socket.id];
+    if (player) {
+      const speed = 3.5;
+      player.vx = 0;
+      player.vy = 0;
+      if (input.left) player.vx -= speed;
+      if (input.right) player.vx += speed;
+      if (input.up) player.vy -= speed;
+      if (input.down) player.vy += speed;
+
+      player.x += player.vx;
+      player.y += player.vy;
+
+      const dx = player.x - ball.x;
+      const dy = player.y - ball.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < ball.radius + 15) {
+        if (input.kick) {
+          ball.vx = dx * 0.2;
+          ball.vy = dy * 0.2;
+        } else {
+          ball.vx += dx * 0.005;
+          ball.vy += dy * 0.005;
+        }
       }
     }
   });
 
-  ws.on('close',()=>{
-    const room=rooms[roomId];
-    if(room && room.players.has(playerId)){
-      room.players.delete(playerId);
-      if(room.players.size===0){ clearInterval(room.interval); delete rooms[roomId]; }
+  socket.on("chat", ({ roomId, msg, nickname }) => {
+    io.to(roomId).emit("chat", { nickname, msg });
+  });
+
+  socket.on("disconnect", () => {
+    for (const roomId in rooms) {
+      delete rooms[roomId].players[socket.id];
+      if (Object.keys(rooms[roomId].players).length === 0) {
+        delete rooms[roomId];
+      }
     }
   });
 });
 
-function startLoop(roomId){
-  const room=rooms[roomId];
-  room.interval=setInterval(()=>{
-    const b=room.ball;
-    room.players.forEach(p=>{
-      let dx=0, dy=0;
-      if(p.pressing.up) dy--;
-      if(p.pressing.down) dy++;
-      if(p.pressing.left) dx--;
-      if(p.pressing.right) dx++;
-      const len=Math.hypot(dx,dy);
-      if(len>0){
-        dx/=len; dy/=len;
-        p.x+=dx*p.speed; p.y+=dy*p.speed;
-        const dist=Math.hypot(p.x-b.x,p.y-b.y);
-        if(dist<15+b.radius){
-          const ang=Math.atan2(b.y-p.y,b.x-p.x);
-          b.dx+=Math.cos(ang)*1.5; b.dy+=Math.sin(ang)*1.5;
+setInterval(() => {
+  for (const roomId in rooms) {
+    const room = rooms[roomId];
+    if (room.started) {
+      ball.x += ball.vx;
+      ball.y += ball.vy;
+
+      ball.vx *= 0.98;
+      ball.vy *= 0.98;
+
+      if (ball.x < 0 || ball.x > 800) ball.vx *= -1;
+      if (ball.y < 0 || ball.y > 600) ball.vy *= -1;
+
+      room.timer--;
+      if (room.timer <= 0) {
+        room.started = false;
+        room.timer = 360;
+        ball = { x: 400, y: 300, vx: 0, vy: 0, radius: 10 };
+        for (let pid in room.players) {
+          const p = room.players[pid];
+          p.x = p.team === "red" ? 200 : 600;
+          p.y = 300;
         }
       }
-      p.x=Math.max(15,Math.min(585,p.x));
-      p.y=Math.max(15,Math.min(385,p.y));
-    });
-    b.x+=b.dx; b.y+=b.dy;
-    b.dx*=b.friction; b.dy*=b.friction;
-    if(b.x<10||b.x>590) b.dx*=-1;
-    if(b.y<10||b.y>390) b.dy*=-1;
-    b.x=Math.max(10,Math.min(590,b.x));
-    b.y=Math.max(10,Math.min(390,b.y));
 
-    // GOL kontrolü
-    if(b.x<10 || b.x>590){
-      const team = b.x<10 ? 'blue' : 'red';
-      room.score[team]++;
-      // reset top ve oyuncular
-      b.x=300; b.y=200; b.dx=b.dy=0;
-      room.players.forEach(p=>{
-        const side = p.team==='red'?100:500;
-        p.x=side; p.y=Math.random()*300+50;
+      io.to(roomId).emit("gameState", {
+        players: Object.values(room.players),
+        ball,
+        score: room.score,
+        timeLeft: room.timer
       });
     }
+  }
+}, 1000 / 60);
 
-    const state={ type:'gameState',
-      players:Array.from(room.players.values()).map(p=>({
-        playerId:p.playerId, nickname:p.nickname, team:p.team, x:p.x, y:p.y
-      })),
-      ball:{x:b.x,y:b.y},
-      score:room.score
-    };
-    room.players.forEach(p=>p.ws.send(JSON.stringify(state)));
-
-  },1000/60);
-}
-
-const port=process.env.PORT||3000;
-server.listen(port,()=>console.log('Server port',port));
+http.listen(PORT, () => {
+  console.log(`HackBall sunucusu ${PORT} portunda çalışıyor`);
+});
