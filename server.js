@@ -1,178 +1,158 @@
-const express = require("express");
-const http = require("http");
-const { Server } = require("socket.io");
+const WebSocket = require('ws');
+const http = require('http');
 
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server);
+const server = http.createServer();
+const wss = new WebSocket.Server({ server });
 
-const WIDTH = 900;
-const HEIGHT = 520;
-const GOAL_HEIGHT = 140;
-const PLAYER_RADIUS = 15;
-const BALL_RADIUS = 10;
-const PLAYER_ACCEL = 0.6;
-const PLAYER_FRICTION = 0.86;
-const BALL_FRICTION = 0.992;
-const KICK_FORCE = 7;
+const rooms = {}; // { roomId: { players: Map, ball: {}, interval: ID } }
 
-let parties = {};
+function createPlayer(nickname) {
+  return {
+    nickname,
+    x: Math.random() * 500 + 50,
+    y: Math.random() * 300 + 50,
+    dx: 0,
+    dy: 0,
+    speed: 2.5,
+    pressing: { up: false, down: false, left: false, right: false },
+  };
+}
 
-io.on("connection", (socket) => {
-  socket.on("createParty", ({ nick }) => {
-    if (!nick) return;
-    const partyID = Math.random().toString(36).substr(2, 5).toUpperCase();
+function createBall() {
+  return {
+    x: 300,
+    y: 200,
+    dx: 0,
+    dy: 0,
+    radius: 10,
+    friction: 0.98,
+  };
+}
 
-    parties[partyID] = {
-      leader: socket.id,
-      players: {},
-      ball: { x: WIDTH / 2, y: HEIGHT / 2, vx: 0, vy: 0 },
-      score: { red: 0, blue: 0 },
-    };
+wss.on('connection', (ws) => {
+  let roomId = '';
+  let playerId = '';
 
-    parties[partyID].players[socket.id] = {
-      id: socket.id,
-      nick,
-      team: "red",
-      x: 100,
-      y: HEIGHT / 2,
-      vx: 0,
-      vy: 0,
-      input: {},
-    };
-
-    socket.join(partyID);
-    socket.emit("start", { partyID, leader: true, players: parties[partyID].players });
-  });
-
-  socket.on("joinParty", ({ nick, partyID }) => {
-    const party = parties[partyID];
-    if (!party) {
-      socket.emit("joinError", "Böyle bir parti yok!");
+  ws.on('message', (msg) => {
+    let data;
+    try {
+      data = JSON.parse(msg);
+    } catch (e) {
       return;
     }
 
-    const team =
-      Object.values(party.players).filter((p) => p.team === "red").length <=
-      Object.values(party.players).filter((p) => p.team === "blue").length
-        ? "red"
-        : "blue";
+    if (data.type === 'join') {
+      const { nickname, roomId: rid } = data;
+      roomId = rid;
 
-    party.players[socket.id] = {
-      id: socket.id,
-      nick,
-      team,
-      x: team === "red" ? 100 : WIDTH - 100,
-      y: HEIGHT / 2,
-      vx: 0,
-      vy: 0,
-      input: {},
-    };
+      if (!rooms[roomId]) {
+        rooms[roomId] = {
+          players: new Map(),
+          ball: createBall(),
+        };
 
-    socket.join(partyID);
-    socket.emit("start", { partyID, leader: false, players: party.players });
-  });
+        startGameLoop(roomId);
+      }
 
-  socket.on("input", (input) => {
-    const partyID = findParty(socket.id);
-    if (!partyID) return;
-    parties[partyID].players[socket.id].input = input;
-  });
+      playerId = generateId();
+      const player = createPlayer(nickname);
+      rooms[roomId].players.set(playerId, { ws, ...player });
 
-  socket.on("kickPlayer", ({ targetId }) => {
-    const partyID = findParty(socket.id);
-    if (!partyID) return;
-    if (parties[partyID].leader === socket.id) {
-      io.to(targetId).emit("kicked");
-      delete parties[partyID].players[targetId];
+    } else if (data.type === 'move') {
+      const room = rooms[roomId];
+      if (!room || !room.players.has(playerId)) return;
+
+      const player = room.players.get(playerId);
+      player.pressing[data.dir] = true;
+
+      setTimeout(() => {
+        if (player.pressing) player.pressing[data.dir] = false;
+      }, 100); // tuş basımı kısa sürede biter
     }
   });
 
-  socket.on("disconnect", () => {
-    const partyID = findParty(socket.id);
-    if (!partyID) return;
-    delete parties[partyID].players[socket.id];
-    if (Object.keys(parties[partyID].players).length === 0) {
-      delete parties[partyID];
+  ws.on('close', () => {
+    const room = rooms[roomId];
+    if (room && room.players.has(playerId)) {
+      room.players.delete(playerId);
+      if (room.players.size === 0) {
+        clearInterval(room.interval);
+        delete rooms[roomId];
+      }
     }
   });
 });
 
-function findParty(id) {
-  return Object.keys(parties).find((pid) => parties[pid].players[id]);
-}
+function startGameLoop(roomId) {
+  const FPS = 60;
+  rooms[roomId].interval = setInterval(() => {
+    const room = rooms[roomId];
+    const ball = room.ball;
 
-setInterval(() => {
-  for (const pid in parties) {
-    const party = parties[pid];
-    const ball = party.ball;
+    // Oyuncu hareketi
+    for (let [id, player] of room.players.entries()) {
+      let dx = 0, dy = 0;
+      if (player.pressing.up) dy -= 1;
+      if (player.pressing.down) dy += 1;
+      if (player.pressing.left) dx -= 1;
+      if (player.pressing.right) dx += 1;
 
-    for (const id in party.players) {
-      const p = party.players[id];
-      const i = p.input || {};
+      const len = Math.sqrt(dx * dx + dy * dy);
+      if (len > 0) {
+        dx /= len;
+        dy /= len;
+        player.x += dx * player.speed;
+        player.y += dy * player.speed;
 
-      if (i.left) p.vx -= PLAYER_ACCEL;
-      if (i.right) p.vx += PLAYER_ACCEL;
-      if (i.up) p.vy -= PLAYER_ACCEL;
-      if (i.down) p.vy += PLAYER_ACCEL;
-
-      p.x += p.vx;
-      p.y += p.vy;
-      p.vx *= PLAYER_FRICTION;
-      p.vy *= PLAYER_FRICTION;
-
-      if (p.x < PLAYER_RADIUS) p.x = PLAYER_RADIUS;
-      if (p.x > WIDTH - PLAYER_RADIUS) p.x = WIDTH - PLAYER_RADIUS;
-      if (p.y < PLAYER_RADIUS) p.y = PLAYER_RADIUS;
-      if (p.y > HEIGHT - PLAYER_RADIUS) p.y = HEIGHT - PLAYER_RADIUS;
-
-      // topa vurma
-      const dx = ball.x - p.x;
-      const dy = ball.y - p.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-
-      if (i.kick && dist < PLAYER_RADIUS + BALL_RADIUS) {
-        const angle = Math.atan2(dy, dx);
-        ball.vx += Math.cos(angle) * KICK_FORCE;
-        ball.vy += Math.sin(angle) * KICK_FORCE;
+        // Topa çarpma kontrolü
+        const dist = Math.hypot(player.x - ball.x, player.y - ball.y);
+        if (dist < 15 + ball.radius) {
+          let angle = Math.atan2(ball.y - player.y, ball.x - player.x);
+          ball.dx += Math.cos(angle) * 1.5;
+          ball.dy += Math.sin(angle) * 1.5;
+        }
       }
+
+      // Sınır kontrolü
+      player.x = Math.max(15, Math.min(585, player.x));
+      player.y = Math.max(15, Math.min(385, player.y));
     }
 
-    // top hareketi
-    ball.x += ball.vx;
-    ball.y += ball.vy;
-    ball.vx *= BALL_FRICTION;
-    ball.vy *= BALL_FRICTION;
+    // Top fiziği
+    ball.x += ball.dx;
+    ball.y += ball.dy;
+    ball.dx *= ball.friction;
+    ball.dy *= ball.friction;
 
-    if (ball.y < BALL_RADIUS || ball.y > HEIGHT - BALL_RADIUS) ball.vy *= -1;
+    // Top sınırdan sekme
+    if (ball.x < 10 || ball.x > 590) ball.dx *= -1;
+    if (ball.y < 10 || ball.y > 390) ball.dy *= -1;
+    ball.x = Math.max(10, Math.min(590, ball.x));
+    ball.y = Math.max(10, Math.min(390, ball.y));
 
-    const goalTop = (HEIGHT - GOAL_HEIGHT) / 2;
-    const goalBottom = goalTop + GOAL_HEIGHT;
+    // Durum gönder
+    const gameState = {
+      type: 'gameState',
+      players: Array.from(room.players.values()).map(p => ({
+        nickname: p.nickname,
+        x: p.x,
+        y: p.y,
+      })),
+      ball: {
+        x: ball.x,
+        y: ball.y,
+      }
+    };
 
-    if (ball.x < BALL_RADIUS && ball.y > goalTop && ball.y < goalBottom) {
-      party.score.blue++;
-      resetBall(ball);
+    for (let player of room.players.values()) {
+      player.ws.send(JSON.stringify(gameState));
     }
-    if (ball.x > WIDTH - BALL_RADIUS && ball.y > goalTop && ball.y < goalBottom) {
-      party.score.red++;
-      resetBall(ball);
-    }
-
-    io.to(pid).emit("state", {
-      players: party.players,
-      ball,
-      score: party.score,
-      leader: party.leader,
-      partyID: pid,
-    });
-  }
-}, 1000 / 60);
-
-function resetBall(ball) {
-  ball.x = WIDTH / 2;
-  ball.y = HEIGHT / 2;
-  ball.vx = 0;
-  ball.vy = 0;
+  }, 1000 / FPS);
 }
 
-server.listen(process.env.PORT || 3000, () => console.log("HackBall çalışıyor"));
+function generateId() {
+  return Math.random().toString(36).substring(2, 8);
+}
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`HackBall server running on ${PORT}`));
